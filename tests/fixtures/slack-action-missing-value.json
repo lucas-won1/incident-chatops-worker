@@ -1,0 +1,21 @@
+{
+  "type": "block_actions",
+  "user": {
+    "id": "U123"
+  },
+  "team": {
+    "id": "T123"
+  },
+  "channel": {
+    "id": "C123"
+  },
+  "message": {
+    "ts": "1712345678.000100",
+    "text": "do not reveal this payload text"
+  },
+  "actions": [
+    {
+      "action_id": "incident.analyze"
+    }
+  ]
+}

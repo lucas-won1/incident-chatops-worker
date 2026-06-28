@@ -1,0 +1,35 @@
+sentry:
+  projects:
+    - organizationSlug: demo-org
+      projectSlug: frontend
+      slackChannel: "#incidents"
+repos:
+  allowlist:
+    - /Users/example/work/service-repo
+worktree:
+  root: /Users/example/.local/share/incident-chatops-worker/worktrees
+branch:
+  prefix: incident/
+slack:
+  channels:
+    default: "#incidents"
+    routing:
+      frontend: "#frontend-incidents"
+runners:
+  genericCommandAllowlist:
+    - echo
+  definitions:
+    - id: echo-safe
+      type: generic
+      command: echo
+      args:
+        - incident-analysis-placeholder
+mr:
+  provider: gitlab
+  gitlab:
+    baseUrl: https://gitlab.com/api/v4
+    project: example-group/service-repo
+    defaultLabels:
+      - incident-chatops
+    draft: true
+  defaultTargetBranch: main

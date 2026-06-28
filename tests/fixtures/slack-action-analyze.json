@@ -1,0 +1,18 @@
+{
+  "type": "block_actions",
+  "user": {
+    "id": "U123"
+  },
+  "channel": {
+    "id": "C123"
+  },
+  "message": {
+    "ts": "1712345678.000100"
+  },
+  "actions": [
+    {
+      "action_id": "incident.analyze",
+      "value": "{\"issueId\":\"SENTRY-123\",\"repoId\":\"repo-api\"}"
+    }
+  ]
+}
