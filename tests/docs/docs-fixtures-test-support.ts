@@ -13,7 +13,11 @@ export const validReadme = [
   "[문제 해결](docs/troubleshooting.md)",
 ].join("\n")
 
-export const validEnvExample = "SENTRY_POLL_INTERVAL_SECONDS=300\n"
+export const validEnvExample = [
+  "SENTRY_POLL_INTERVAL_SECONDS=300",
+  "GITLAB_TOKEN=gitlab-token-redacted-example",
+  "GITHUB_TOKEN=github-token-redacted-example",
+].join("\n")
 
 export const validYamlExample = [
   "sentry:",
@@ -27,12 +31,6 @@ export const validOperationsDocWithClaim = (claim: string): string =>
   ["# 운영 가이드", "", "## 로컬 셸 운영", "SQLite daemon run-once status logs", "", claim].join(
     "\n",
   )
-
-export const supportedSoundingUnsupportedClaims = [
-  "GUI dashboard is available for operators.",
-  "Webhook setup is available for operators.",
-  "github provider is available for operators.",
-] as const
 
 export const validPublicDocs: Readonly<Record<string, string>> = {
   "docs/architecture.md":
@@ -84,12 +82,6 @@ export const writeValidDocsFixture = async (
     ...validPublicDocs,
     ...files,
   })
-
-export const writeValidDocsFixtureWithOperationsClaim = (
-  root: string,
-  claim: string,
-): Promise<void> =>
-  writeValidDocsFixture(root, { "docs/operations.md": validOperationsDocWithClaim(claim) })
 
 export const writeValidDocsFixtureWithoutPublicDoc = async (
   root: string,

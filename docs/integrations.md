@@ -1,6 +1,6 @@
-# 연동, runner, worktree, GitLab
+# 연동, runner, worktree, Git providers
 
-이 문서는 현재 MVP가 실제로 연결하는 외부 표면만 설명합니다. Slack은 Socket Mode 버튼 UI, Sentry는 polling 기반 감지와 context fetch, GitLab은 Merge Request 생성 대상입니다. runner와 local git worktree는 Slack approval 이후에만 실행되는 내부 실행 경계입니다.
+이 문서는 현재 MVP가 실제로 연결하는 외부 표면만 설명합니다. Slack은 Socket Mode 버튼 UI, Sentry는 polling 기반 감지와 context fetch, GitLab/GitHub는 MR/PR 생성 대상입니다. runner와 local git worktree는 Slack approval 이후에만 실행되는 내부 실행 경계입니다.
 
 ## Slack 앱
 
@@ -18,13 +18,17 @@ Sentry 설정은 읽기 전용 토큰을 전제로 합니다. `SENTRY_AUTH_TOKEN
 
 context fetch는 runner 실행 직전에 incident context를 준비하는 단계입니다. 저장된 Sentry snapshot이 있으면 먼저 재사용하고, 없으면 `organizations/<organizationSlug>/issues/<issueId>/events/`에서 event 목록을 가져옵니다. runner에 넘기는 context에는 `trustBoundary: "untrusted_external_sentry"`가 붙으며, 저장 또는 전달 전에 설정된 secret 값은 redaction 됩니다. Sentry 제목, stack trace, event message는 명령이 아니라 신뢰하지 않는 입력 데이터로 취급해야 합니다.
 
-## GitLab Merge Request
+## Git provider MR/PR
 
-현재 MR provider는 GitLab만 지원합니다. 토큰은 env-only 값인 `GITLAB_TOKEN`으로 주입하고 YAML에는 넣지 않습니다. 토큰 소유자는 대상 project에 branch push와 Merge Request 생성 권한만 갖도록 최소화합니다.
+현재 Git provider는 GitLab Merge Request와 GitHub Pull Request를 지원합니다. 토큰은 env-only 값인 `GITLAB_TOKEN` 또는 `GITHUB_TOKEN`으로 주입하고 YAML에는 넣지 않습니다. 토큰 소유자는 대상 project/repository에 MR/PR REST API 호출 권한만 갖도록 최소화합니다.
+
+Branch push는 로컬 git remote credential이 처리합니다. Git provider token은 branch push에 사용하지 않습니다.
 
 `mr.gitlab` 정책은 API base, project, labels, draft 여부를 담습니다. API base는 GitLab API v4 base를 의미하고, project는 GitLab project path입니다. `mr.defaultTargetBranch`는 MR의 target branch가 되며, source branch는 incident workflow가 만든 branch입니다. labels는 GitLab 요청에서 쉼표로 합쳐져 전달되고, draft 설정은 boolean 그대로 사용됩니다.
 
-workflow의 push timing은 보수적입니다. `fix_and_mr` runner가 완료된 뒤 `verificationResults`가 통과 상태인지 확인하고, 그 다음 `git push <remote> <branch>`를 실행합니다. push가 끝난 뒤 GitLab Merge Request를 만들며, MR 생성이 실패하면 branch는 remote에 남고 incident state는 `mr_failed_after_push`로 기록됩니다.
+`mr.github` 정책은 GitHub API base, owner, repo, labels, draft 여부를 담습니다. GitHub.com은 기본값 `https://api.github.com`을 사용하고, GitHub Enterprise는 해당 REST API base URL을 설정합니다. `mr.defaultTargetBranch`는 PR의 base branch가 되며, source branch는 incident workflow가 만든 branch입니다. labels는 PR 생성 후 Issues labels REST API로 적용됩니다.
+
+workflow의 push timing은 보수적입니다. `fix_and_mr` runner가 완료된 뒤 `verificationResults`가 통과 상태인지 확인하고, 그 다음 `git push <remote> <branch>`를 실행합니다. push가 끝난 뒤 selected provider의 REST API로 GitLab MR 또는 GitHub PR을 만들며, 생성 또는 label 적용이 실패하면 branch는 remote에 남고 incident state는 `mr_failed_after_push`로 기록됩니다.
 
 ## Codex exec runner
 
@@ -32,7 +36,7 @@ Codex exec runner는 `CODEX_BIN`이 있으면 그 실행 파일을 사용하고,
 
 실행 argv는 `Codex exec` 형태입니다. runner는 `exec --json --cd <worktree> --sandbox <mode> --output-last-message <file> -`를 사용하고, prompt는 stdin으로 전달합니다. `analysis_only`는 read-only sandbox를 사용하고 prompt contract에 no-write, no-commit, no-push, no-MR을 명시합니다. 실행 후 worktree가 dirty 상태이면 성공으로 보지 않습니다.
 
-`fix_and_mr`는 workspace-write sandbox를 사용합니다. 이 모드에서는 worktree 수정이 가능하지만, runner가 직접 push하거나 MR을 만들면 안 됩니다. runner는 변경 요약과 검증 결과를 JSON으로 반환하고, workflow가 clean/verification 확인 후 push와 GitLab MR 생성을 담당합니다.
+`fix_and_mr`는 workspace-write sandbox를 사용합니다. 이 모드에서는 worktree 수정이 가능하지만, runner가 직접 push하거나 MR/PR을 만들면 안 됩니다. runner는 변경 요약과 검증 결과를 JSON으로 반환하고, workflow가 clean/verification 확인 후 push와 Git provider MR/PR 생성을 담당합니다.
 
 `--output-last-message` 파일은 성공 판정의 핵심 경계입니다. process exit code가 0이어도 파일이 없거나 JSON이 malformed이면 실패합니다. `analysis_only` 출력 JSON contract는 `{"analysis": string}`이고, `fix_and_mr` 출력 JSON contract는 `{"analysis": string, "changesSummary": string, "verificationResults": string, "branchInfo": string, "mrReadiness": string}`입니다.
 
@@ -64,6 +68,6 @@ git command timeout은 기본 60초입니다. `git status`, `git worktree add`, 
 
 ## 현재 extension boundaries
 
-현재 확장 가능한 경계는 `SlackActionDispatcher`, `WorkflowSentryContextProvider`, `RunnerAdapter`, `MergeRequestProvider`, `WorkflowRepoAdapter`입니다. 다만 shipped MVP에서 운영자가 바로 사용할 수 있는 표면은 Slack Socket Mode, Sentry polling/context fetch, GitLab Merge Request, Codex exec runner, generic command runner, local git worktree입니다.
+현재 확장 가능한 경계는 `SlackActionDispatcher`, `WorkflowSentryContextProvider`, `RunnerAdapter`, `MergeRequestProvider`, `WorkflowRepoAdapter`입니다. 다만 shipped MVP에서 운영자가 바로 사용할 수 있는 표면은 Slack Socket Mode, Sentry polling/context fetch, GitLab Merge Request, GitHub Pull Request, Codex exec runner, generic command runner, local git worktree입니다.
 
-지원하지 않는 표면을 지원되는 것처럼 설정하지 마세요. Sentry 감지는 polling 경로만 사용하고, MR 생성은 GitLab 경로만 사용합니다. runner는 승인된 worktree 안에서만 실행되어야 하며, command allowlist와 repo allowlist를 우회하는 운영 방식은 현재 문서 범위 밖입니다.
+지원하지 않는 표면을 지원되는 것처럼 설정하지 마세요. Sentry 감지는 polling 경로만 사용하고, MR/PR 생성은 GitLab/GitHub REST API 경로만 사용합니다. Bitbucket, Gitea/Forgejo/Codeberg, Azure DevOps Repos, AWS CodeCommit, Gerrit provider는 이 릴리스에서 지원하지 않습니다. runner는 승인된 worktree 안에서만 실행되어야 하며, command allowlist와 repo allowlist를 우회하는 운영 방식은 현재 문서 범위 밖입니다.

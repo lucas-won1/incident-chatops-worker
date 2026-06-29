@@ -102,7 +102,7 @@ export class WorkflowJobExecutor {
         this.#options.state.saveMrLink({
           incidentId: context.incident.incidentId,
           jobId: context.job.jobId,
-          provider: "gitlab",
+          provider: this.#options.mrProvider.provider,
           url: mr.url,
           createdAt: nowIso(),
         })

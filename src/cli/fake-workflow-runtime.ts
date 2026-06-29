@@ -1,5 +1,9 @@
 import type { WorkerSettings } from "../config/index.js"
-import type { CreateMergeRequestInput, MergeRequestProvider } from "../mr/types.js"
+import type {
+  CreateMergeRequestInput,
+  MergeRequestProvider,
+  MergeRequestProviderId,
+} from "../mr/types.js"
 import type { PushGitBranchRequest } from "../repo/local-git.js"
 import type { RunnerAdapter, RunnerRequest, RunnerResult } from "../runner/types.js"
 import type { SlackRenderedMessage } from "../slack/index.js"
@@ -17,10 +21,16 @@ type FakeStateStore = ReturnType<typeof openSqliteStateStore>
 export const fakeWorkflowRootThreadTs = "1719999999.000200"
 
 class FakeMergeRequestProvider implements MergeRequestProvider {
+  public readonly provider: MergeRequestProviderId
+
+  public constructor(provider: MergeRequestProviderId) {
+    this.provider = provider
+  }
+
   public async createMergeRequest(
     input: CreateMergeRequestInput,
   ): Promise<{ readonly url: string }> {
-    return { url: `https://gitlab.invalid/fake/${input.sourceBranch}` }
+    return { url: `https://${this.provider}.invalid/fake/${input.sourceBranch}` }
   }
 }
 
@@ -111,7 +121,7 @@ export const createFakeDaemonWorkflowRuntime = (
   const workflow = new IncidentWorkflow({
     branchPrefix: settings.config.branchPrefix,
     defaultTargetBranch: settings.config.mr.defaultTargetBranch,
-    mrProvider: new FakeMergeRequestProvider(),
+    mrProvider: new FakeMergeRequestProvider(settings.config.mr.provider),
     remoteName: "origin",
     repo: new FakeRepoAdapter(),
     repoPaths: repoPathsByProject(settings),

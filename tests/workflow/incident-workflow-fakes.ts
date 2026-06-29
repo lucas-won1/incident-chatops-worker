@@ -1,4 +1,8 @@
-import type { CreateMergeRequestInput, MergeRequestProvider } from "../../src/mr/types.js"
+import type {
+  CreateMergeRequestInput,
+  MergeRequestProvider,
+  MergeRequestProviderId,
+} from "../../src/mr/types.js"
 import type { RunnerRequest, RunnerResult } from "../../src/runner/types.js"
 import type { SlackRenderedMessage } from "../../src/slack/block-kit.js"
 import type {
@@ -87,8 +91,18 @@ export class RecordingRepoAdapter implements WorkflowRepoAdapter {
 }
 
 export class RecordingMergeRequestProvider implements MergeRequestProvider {
+  public readonly provider: MergeRequestProviderId
+  public readonly url: string
   public readonly calls: CreateMergeRequestInput[] = []
   public failure: Error | undefined
+
+  public constructor(
+    provider: MergeRequestProviderId = "gitlab",
+    url = defaultMergeRequestUrl(provider),
+  ) {
+    this.provider = provider
+    this.url = url
+  }
 
   public async createMergeRequest(
     input: CreateMergeRequestInput,
@@ -97,7 +111,16 @@ export class RecordingMergeRequestProvider implements MergeRequestProvider {
     if (this.failure !== undefined) {
       throw this.failure
     }
-    return { url: "https://gitlab.example/incidents/merge_requests/7" }
+    return { url: this.url }
+  }
+}
+
+const defaultMergeRequestUrl = (provider: MergeRequestProviderId): string => {
+  switch (provider) {
+    case "gitlab":
+      return "https://gitlab.example/incidents/merge_requests/7"
+    case "github":
+      return "https://github.example/incidents/pull/7"
   }
 }
 

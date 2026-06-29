@@ -32,4 +32,13 @@ mr:
     defaultLabels:
       - incident-chatops
     draft: true
+  # GitHub alternate example:
+  # provider: github
+  # github:
+  #   baseUrl: https://api.github.com
+  #   owner: example-org
+  #   repo: service-repo
+  #   defaultLabels:
+  #     - incident-chatops
+  #   draft: true
   defaultTargetBranch: main

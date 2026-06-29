@@ -3,6 +3,7 @@ import {
   detectedWorkflowIncident,
 } from "../cli/daemon-runtime.js"
 import { createFakeDaemonWorkflowRuntime } from "../cli/fake-workflow-runtime.js"
+import { daemonSecretValues } from "../cli/mr-provider-routing.js"
 import { configFailure, loadCommandSettings } from "../cli/settings.js"
 import { ConfigValidationError } from "../config/index.js"
 import { type CliResult, fail, ok } from "../shared/cli-result.js"
@@ -40,12 +41,7 @@ export const runSentryOnce = async (options: RunOnceOptions): Promise<CliResult>
           await workflow.handleDetectedIncident(detectedWorkflowIncident(loaded.settings, incident))
         },
         projects: loaded.settings.config.sentryProjects,
-        secretRedactionValues: [
-          loaded.settings.env.gitlabToken,
-          loaded.settings.env.sentryAuthToken,
-          loaded.settings.env.slackAppToken,
-          loaded.settings.env.slackBotToken,
-        ],
+        secretRedactionValues: daemonSecretValues(loaded.settings),
         store,
       })
       return ok(

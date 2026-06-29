@@ -6,7 +6,11 @@ import { parse as parseYaml } from "yaml"
 import { z } from "zod"
 
 import { repoId, sentryIssueId, slackChannelId, slackThreadTs, slackUserId } from "../domain/ids.js"
-import type { CreateMergeRequestInput, MergeRequestProvider } from "../mr/types.js"
+import type {
+  CreateMergeRequestInput,
+  MergeRequestProvider,
+  MergeRequestProviderId,
+} from "../mr/types.js"
 import type { RunnerAdapter, RunnerRequest, RunnerResult } from "../runner/types.js"
 import { findOptionValue } from "../shared/cli-args.js"
 import type { CliResult } from "../shared/cli-result.js"
@@ -37,7 +41,12 @@ const scenarioSchema = z
       dirtyAnalysis: z.boolean().default(false),
       verification: z.union([z.literal("passed"), z.literal("failed")]).default("passed"),
     }),
-    mr: z.object({ fail: z.boolean().default(false) }).default({ fail: false }),
+    mr: z
+      .object({
+        fail: z.boolean().default(false),
+        provider: z.union([z.literal("gitlab"), z.literal("github")]).default("gitlab"),
+      })
+      .default({ fail: false, provider: "gitlab" }),
   })
   .strict()
 
@@ -113,16 +122,19 @@ class ScenarioRepo implements WorkflowRepoAdapter {
 class ScenarioMrProvider implements MergeRequestProvider {
   public readonly calls: CreateMergeRequestInput[] = []
 
-  public constructor(private readonly shouldFail: boolean) {}
+  public constructor(
+    public readonly provider: MergeRequestProviderId,
+    private readonly shouldFail: boolean,
+  ) {}
 
   public async createMergeRequest(
     input: CreateMergeRequestInput,
   ): Promise<{ readonly url: string }> {
     this.calls.push(input)
     if (this.shouldFail) {
-      throw new Error("GitLab fixture rejected MR glpat-secret")
+      throw new Error(`${this.provider} fixture rejected MR token-secret`)
     }
-    return { url: "https://gitlab.example/incidents/merge_requests/7" }
+    return { url: `https://${this.provider}.example/incidents/merge_requests/7` }
   }
 }
 
@@ -169,7 +181,7 @@ export const runWorkflowScenarioCommand = async (args: readonly string[]): Promi
   const slack = new ScenarioSlack()
   const runner = new ScenarioRunner(scenario)
   const repo = new ScenarioRepo()
-  const mrProvider = new ScenarioMrProvider(scenario.mr.fail)
+  const mrProvider = new ScenarioMrProvider(scenario.mr.provider, scenario.mr.fail)
   const workflow = new IncidentWorkflow({
     branchPrefix: "incident/",
     defaultTargetBranch: "main",
@@ -203,7 +215,8 @@ export const runWorkflowScenarioCommand = async (args: readonly string[]): Promi
     `job rows: ${jobRows.size}`,
     `push calls: ${repo.pushed.length} ${repo.pushed.join(",")}`,
     `MR calls: ${mrProvider.calls.length}`,
-    `MR URL: ${mrProvider.calls.length > 0 && !scenario.mr.fail ? "https://gitlab.example/incidents/merge_requests/7" : "none"}`,
+    `MR provider: ${mrProvider.provider}`,
+    `MR URL: ${mrProvider.calls.length > 0 && !scenario.mr.fail ? `https://${mrProvider.provider}.example/incidents/merge_requests/7` : "none"}`,
     `audit actions: ${audit.map((entry) => entry.action).join(",")}`,
     "cleanup: scenario temp store removed",
   ].join("\n")

@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs"
+
 import { describe, expect, it } from "vitest"
 
 import { runCliAsync } from "../../src/cli.js"
@@ -33,6 +35,67 @@ describe("production CLI commands", () => {
     expect(result.stdout).not.toContain("sntrys_redacted_example")
   })
 
+  it("doctor labels the selected GitHub provider token in fake mode", async () => {
+    // Given: fake mode settings select GitHub without GitLab routing.
+    const { configPath, dbPath, envPath } = writeFixtureFiles(createTempDir())
+    writeFileSync(
+      configPath,
+      `
+sentry:
+  projects:
+    - organizationSlug: demo-org
+      projectSlug: frontend
+      slackChannel: "#incidents"
+repos:
+  allowlist:
+    - /Users/won/Work/incident-chatops-worker
+worktree:
+  root: /Users/won/Work/incident-chatops-worker/.omo/worktrees
+branch:
+  prefix: incident/
+slack:
+  channels:
+    default: "#incidents"
+runners:
+  genericCommandAllowlist:
+    - echo
+  definitions:
+    - id: echo-safe
+      type: generic
+      command: echo
+mr:
+  provider: github
+  github:
+    owner: demo-org
+    repo: frontend
+    defaultLabels:
+      - incident-chatops
+    draft: false
+  defaultTargetBranch: main
+`,
+    )
+    writeFileSync(
+      envPath,
+      `FAKE_MODE=1
+GITHUB_TOKEN=ghp-redacted-example
+SENTRY_AUTH_TOKEN=sntrys_redacted_example
+SENTRY_BASE_URL=https://sentry.invalid/api/0
+SLACK_APP_TOKEN=xapp-redacted-example
+SLACK_BOT_TOKEN=xoxb-redacted-example
+STATE_DB_PATH=${dbPath}
+`,
+    )
+
+    // When: doctor checks the GitHub-selected setup without live probes.
+    const result = await runCliAsync(["doctor", "--config", configPath, "--env-file", envPath])
+
+    // Then: the provider token row names GitHub and does not keep stale GitLab wording.
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("GitHub token: present (reachability skipped in fake mode)")
+    expect(result.stdout).not.toContain("GitLab token: present")
+    expect(result.stdout).not.toContain("ghp-redacted-example")
+  })
+
   it("doctor reports production reachability as checked rather than not attempted", async () => {
     // Given: production-mode settings and an injected offline reachability checker.
     const { configPath, envPath } = writeFixtureFiles(createTempDir(), { FAKE_MODE: "0" })
@@ -40,7 +103,7 @@ describe("production CLI commands", () => {
     // When: doctor validates live-mode setup without using the network.
     const result = await runCliAsync(["doctor", "--config", configPath, "--env-file", envPath], {
       reachability: () => ({
-        gitlab: { kind: "warning", message: "offline probe unavailable" },
+        gitProvider: { kind: "warning", message: "offline probe unavailable" },
         sentry: { kind: "ok", message: "authenticated probe ok" },
         slackApp: { kind: "ok", message: "apps.connections.open ok" },
         slackBot: { kind: "ok", message: "auth.test ok" },
@@ -70,7 +133,7 @@ describe("production CLI commands", () => {
     // When: doctor validates injected reachability statuses.
     const result = await runCliAsync(["doctor", "--config", configPath, "--env-file", envPath], {
       reachability: () => ({
-        gitlab: { kind: "ok", message: "user probe HTTP 200" },
+        gitProvider: { kind: "ok", message: "user probe HTTP 200" },
         sentry: { kind: "ok", message: "organizations probe HTTP 200" },
         slackApp: { kind: "warning", message: "apps.connections.open HTTP 401" },
         slackBot: { kind: "ok", message: "auth.test ok" },

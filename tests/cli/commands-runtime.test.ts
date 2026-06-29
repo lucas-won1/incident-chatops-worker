@@ -115,6 +115,40 @@ describe("production daemon command runtime", () => {
     expect(socketStops).toBe(1)
   })
 
+  it("stops default workflow runtime when Slack Socket Mode stop fails during shutdown", async () => {
+    // Given: a resident default daemon whose Slack adapter rejects during normal shutdown.
+    const { configPath, envPath } = writeFixtureFiles(createTempDir(), { FAKE_MODE: "0" })
+    const controller = new AbortController()
+    const socketStarted = deferred()
+    let workflowStops = 0
+
+    // When: shutdown reaches the default Slack stop path.
+    const running = runCliAsync(["daemon", "--config", configPath, "--env-file", envPath], {
+      daemonWorkflowFactory: () => ({
+        handleDetectedIncident: async () => undefined,
+        handleSlackAction: async () => undefined,
+        stop: () => {
+          workflowStops += 1
+        },
+      }),
+      signal: controller.signal,
+      slackSocketModeFactory: () => ({
+        start: async () => {
+          socketStarted.resolve()
+        },
+        stop: async () => {
+          throw new Error("socket stop failed")
+        },
+      }),
+    })
+    await socketStarted.promise
+    controller.abort()
+
+    // Then: the adapter error still propagates, but workflow cleanup is attempted.
+    await expect(running).rejects.toThrow("socket stop failed")
+    expect(workflowStops).toBe(1)
+  })
+
   it("sends default daemon poll detections through workflow initial-button handling", async () => {
     // Given: production-mode settings with a fake poller that reports a new Sentry issue.
     const { configPath, envPath } = writeFixtureFiles(createTempDir(), { FAKE_MODE: "0" })

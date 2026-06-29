@@ -6,6 +6,13 @@ import { parseDocument } from "yaml"
 import { findOptionValue } from "../shared/cli-args.js"
 import type { CliResult } from "../shared/cli-result.js"
 import {
+  hasAnySecretMarker,
+  hasRawSecret,
+  hasReadmeLink,
+  hasUnsupportedDocsSurface,
+} from "./docs-surface-scan.js"
+import {
+  hasProviderCliShelloutSurface,
   hasServerCreationSurface,
   hasShippedDevHelperSurface,
   hasStrictBlockedSourceSurface,
@@ -16,9 +23,6 @@ import {
 type ScopeCheck = { readonly label: string; readonly ok: boolean }
 
 const excludedDirectories = new Set([".git", ".omo", "coverage", "node_modules"])
-const secretLikePattern = /(?:xox[abprs]-|xapp-|glpat-|sntrys_)[A-Za-z0-9_-]{4,}/giu
-const allowedSampleSecretPattern =
-  /(?:^|[-_])(?:redacted|example|sample|placeholder|dummy|fake|secret)(?:$|[-_])/iu
 const publicDocRequirements = [
   { filePath: "README.md", phrases: ["로컬 우선", "문서 맵", "Slack approval"] },
   { filePath: "docs/architecture.md", phrases: ["컴포넌트 맵", "시퀀스", "trust boundary"] },
@@ -28,11 +32,9 @@ const publicDocRequirements = [
   { filePath: "docs/operations.md", phrases: ["운영 가이드", "로컬 셸 운영", "SQLite"] },
   { filePath: "docs/troubleshooting.md", phrases: ["문제 해결", "증상", "해결"] },
 ] as const
-const unsupportedDocsSurfacePattern =
-  /webhook|github[\s-]+(?:pr|provider)|\bgui\b(?!\/)|dashboard|대시보드/iu
-const explicitNonGoalPattern =
-  /비목표|지원[^\n.]*아니|지원하지|제외|없|금지|범위 밖|실패|guardrail|쓰지 않습니다|not|no /iu
 const readmeNoWebhookPattern = /no webhook|not.{0,40}webhook|webhook.{0,40}not/iu
+const futureGitProviderSourcePattern =
+  /(?:Bitbucket|Gitea|Forgejo|Codeberg|AzureDevOps|CodeCommit|Gerrit)\w*Provider|(?:bitbucket|gitea|forgejo|codeberg|azure-devops|aws-codecommit|codecommit|gerrit)-provider|(?:bitbucket|gitea|forgejo|codeberg|azure\s+devops|codecommit|gerrit)\s+(?:pr|provider)/iu
 
 const readIfPresent = (filePath: string): string =>
   existsSync(filePath) ? readFileSync(filePath, "utf8") : ""
@@ -77,44 +79,6 @@ const collectFiles = (root: string): readonly TextFile[] => {
   return files
 }
 
-const hasRawSecret = (text: string): boolean => {
-  secretLikePattern.lastIndex = 0
-  const matches = text.matchAll(secretLikePattern)
-  for (const match of matches) {
-    const value = match[0]
-    if (!allowedSampleSecretPattern.test(value)) {
-      return true
-    }
-  }
-  return false
-}
-
-const hasAnySecretMarker = (text: string): boolean => {
-  secretLikePattern.lastIndex = 0
-  const hasSecretMarker = secretLikePattern.test(text)
-  secretLikePattern.lastIndex = 0
-  return hasSecretMarker
-}
-
-const hasReadmeLink = (readme: string, filePath: string): boolean =>
-  filePath === "README.md" || readme.includes(`](${filePath})`) || readme.includes(filePath)
-
-const hasUnsupportedDocsSurface = (text: string): boolean => {
-  let context = ""
-  for (const line of text.split(/\r?\n/u)) {
-    if (line.startsWith("#")) {
-      context = line
-    }
-    if (
-      unsupportedDocsSurfacePattern.test(line) &&
-      !explicitNonGoalPattern.test(`${context}\n${line}`)
-    ) {
-      return true
-    }
-  }
-  return false
-}
-
 const sourceFiles = (files: readonly TextFile[]): readonly TextFile[] =>
   files.filter(
     (file) =>
@@ -143,10 +107,8 @@ const hasGuiDependency = (root: string): boolean =>
 const hasStrictBlockedSourcePattern = (root: string, files: readonly TextFile[]): boolean =>
   shippedScanFiles(root, files).some((file) => hasStrictBlockedSourceSurface(file))
 
-const hasGitHubProvider = (files: readonly TextFile[]): boolean =>
-  sourceFiles(files).some((file) =>
-    /GitHub\w*Provider|github-provider|github\s+pr/iu.test(file.text),
-  )
+const hasUnsupportedGitProvider = (files: readonly TextFile[]): boolean =>
+  sourceFiles(files).some((file) => futureGitProviderSourcePattern.test(file.text))
 
 const hasUnsafeCommandExecution = (files: readonly TextFile[]): boolean =>
   sourceFiles(files).some((file) =>
@@ -155,10 +117,18 @@ const hasUnsafeCommandExecution = (files: readonly TextFile[]): boolean =>
     ),
   )
 
+const hasProviderCliShellout = (files: readonly TextFile[]): boolean =>
+  sourceFiles(files).some((file) => hasProviderCliShelloutSurface(file))
+
 const hasSlackApprovalGate = (readme: string): boolean => /Slack approval/iu.test(readme)
 
 const hasPollingDefault = (envExample: string): boolean =>
   /^SENTRY_POLL_INTERVAL_SECONDS=300$/mu.test(envExample)
+
+const hasProviderTokenExamples = (envExample: string): boolean =>
+  ["GITLAB_TOKEN", "GITHUB_TOKEN"].every((key) =>
+    new RegExp(`^#?\\s*${key}=\\S+`, "mu").test(envExample),
+  )
 
 const renderChecks = (checks: readonly ScopeCheck[]): string =>
   checks
@@ -209,6 +179,10 @@ export const validateDocs = (args: readonly string[]): CliResult => {
       ),
     ),
     check("required .env.example present", readableFile(envExamplePath)),
+    check(
+      "env example includes GitLab and GitHub token placeholders",
+      hasProviderTokenExamples(readIfPresent(envExamplePath)),
+    ),
     check("required YAML example present", readableFile(yamlExamplePath)),
     check("YAML example parses", yamlParses(yamlExample)),
     check("README documents Slack approval", hasSlackApprovalGate(readme)),
@@ -239,8 +213,9 @@ export const verifyScope = (args: readonly string[]): CliResult => {
     check("Slack approval required", hasSlackApprovalGate(readme)),
     check("no webhook server", !hasWebhookServer(files)),
     check("no GUI dependency", !hasGuiDependency(root)),
-    check("no GitHub provider", !hasGitHubProvider(files)),
+    check("only GitLab/GitHub providers are shipped", !hasUnsupportedGitProvider(files)),
     check("no unsafe command execution", !hasUnsafeCommandExecution(files)),
+    check("no provider CLI shellout", !hasProviderCliShellout(files)),
     check(
       "no raw secret patterns",
       !hasRawSecret(publicText) && !sourceFiles(files).some((file) => hasRawSecret(file.text)),
