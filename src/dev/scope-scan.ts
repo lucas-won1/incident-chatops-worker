@@ -25,6 +25,8 @@ const allowedDevSubcommands = new Set([
 ])
 const unsafeDirectiveNames = new Set(["ignore", "expect-error"])
 const unsafeCallNames = new Set(["createServer", "express"])
+const processLaunchCallNames = new Set(["execFile", "execFileSync", "spawn", "spawnSync"])
+const providerCliNames = new Set(["aws", "az", "bb", "gh", "glab"])
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -99,6 +101,11 @@ const stringLiteralText = (node: ts.Node): string | undefined => {
   return undefined
 }
 
+const firstStringArgument = (node: ts.CallExpression): string | undefined => {
+  const firstArgument = node.arguments[0]
+  return firstArgument === undefined ? undefined : stringLiteralText(firstArgument)
+}
+
 const elementAccessIndex = (expression: ts.Expression): number | undefined => {
   if (
     !ts.isElementAccessExpression(expression) ||
@@ -129,17 +136,19 @@ const isStrictSourceOverrideLiteral = (value: string): boolean =>
 const hasSyntaxSurface = (
   file: TextFile,
 ): {
+  readonly providerCliShellout: boolean
   readonly strictBlocked: boolean
   readonly serverCreation: boolean
 } => {
   const sourceFile = sourceFileFor(file)
   if (sourceFile === undefined) {
-    return { strictBlocked: false, serverCreation: false }
+    return { providerCliShellout: false, strictBlocked: false, serverCreation: false }
   }
+  let providerCliShellout = false
   let serverCreation = false
   let strictBlocked = false
   const visit = (node: ts.Node): void => {
-    if (serverCreation && strictBlocked) {
+    if (providerCliShellout && serverCreation && strictBlocked) {
       return
     }
     if (node.kind === ts.SyntaxKind.AnyKeyword) {
@@ -149,6 +158,14 @@ const hasSyntaxSurface = (
       serverCreation = true
       strictBlocked = true
     }
+    if (
+      ts.isCallExpression(node) &&
+      processLaunchCallNames.has(callName(node.expression) ?? "") &&
+      providerCliNames.has(firstStringArgument(node) ?? "")
+    ) {
+      providerCliShellout = true
+      strictBlocked = true
+    }
     const literalText = stringLiteralText(node)
     if (literalText !== undefined && isStrictSourceOverrideLiteral(literalText)) {
       strictBlocked = true
@@ -156,7 +173,7 @@ const hasSyntaxSurface = (
     ts.forEachChild(node, visit)
   }
   visit(sourceFile)
-  return { strictBlocked, serverCreation }
+  return { providerCliShellout, strictBlocked, serverCreation }
 }
 
 const hasUnsafeDirective = (text: string): boolean =>
@@ -232,6 +249,9 @@ const hasRepoLocalCliExport = (root: string, file: TextFile): boolean => {
 
 export const hasServerCreationSurface = (file: TextFile): boolean =>
   hasSyntaxSurface(file).serverCreation
+
+export const hasProviderCliShelloutSurface = (file: TextFile): boolean =>
+  hasSyntaxSurface(file).providerCliShellout
 
 export const hasStrictBlockedSourceSurface = (file: TextFile): boolean =>
   hasSyntaxSurface(file).strictBlocked || hasUnsafeDirective(file.text)

@@ -2,6 +2,7 @@ import { ConfigValidationError, type WorkerSettings } from "../config/index.js"
 import { createSentryPollingSchedule, SentryExternalApiError } from "../sentry/index.js"
 import { type CliResult, fail, ok } from "../shared/cli-result.js"
 import { createSlackSocketModeAdapter } from "../slack/index.js"
+import { openSqliteStateStore } from "../state/sqlite-store.js"
 import {
   createProductionDaemonWorkflowRuntime,
   type DaemonRuntimeDependencies,
@@ -96,11 +97,19 @@ const createDefaultStarter = (runtime: CliRuntimeOptions): DaemonStarter => {
           await workflow.handleSlackAction(intent)
         },
       })
-      await adapter.start()
+      try {
+        await adapter.start()
+      } catch (error) {
+        await workflow.stop?.()
+        throw error
+      }
       return {
         stop: async () => {
-          await adapter.stop()
-          await workflow.stop?.()
+          try {
+            await adapter.stop()
+          } finally {
+            await workflow.stop?.()
+          }
         },
       }
     },
@@ -108,8 +117,14 @@ const createDefaultStarter = (runtime: CliRuntimeOptions): DaemonStarter => {
 }
 
 const createFakeStarter = (): DaemonStarter => ({
-  runPollOnce: () =>
-    ok("source=sentry status=ok fake=true new=0 updated=0 skipped=0 detailFetches=0\n"),
+  runPollOnce: (settings) => {
+    const store = openSqliteStateStore({ path: settings.env.stateDbPath })
+    try {
+      return ok("source=sentry status=ok fake=true new=0 updated=0 skipped=0 detailFetches=0\n")
+    } finally {
+      store.close()
+    }
+  },
   startScheduler: (settings) => {
     const interval = setInterval(() => undefined, settings.env.sentryPollIntervalSeconds * 1000)
     return {
@@ -144,7 +159,7 @@ export const runDaemonCommand = async (
       runtime.daemonStarter ??
       (loaded.fakeMode ? createFakeStarter() : createDefaultStarter(runtime))
     emitLine(lines, runtime, "daemon starting")
-    const slack = await starter.startSlack(loaded.settings)
+    let slack: StartedDaemonResource | undefined = await starter.startSlack(loaded.settings)
     emitLine(
       lines,
       runtime,
@@ -152,11 +167,16 @@ export const runDaemonCommand = async (
     )
     emitLine(lines, runtime, `Sentry polling scheduler: poll interval ${schedule.intervalSeconds}s`)
     if (args.includes("--once")) {
-      const pollResult =
-        starter.runPollOnce === undefined
-          ? await runOnceCommand(args)
-          : await starter.runPollOnce(loaded.settings)
-      await stopResource(slack)
+      const pollResult = await (async () => {
+        try {
+          return starter.runPollOnce === undefined
+            ? await runOnceCommand(args)
+            : await starter.runPollOnce(loaded.settings)
+        } finally {
+          await stopResource(slack)
+          slack = undefined
+        }
+      })()
       if (pollResult.exitCode !== 0) {
         return pollResult
       }
@@ -165,10 +185,17 @@ export const runDaemonCommand = async (
       emitLine(lines, runtime, "clean shutdown")
       return daemonOk(lines, runtime)
     }
-    const scheduler = starter.startScheduler(loaded.settings)
-    await waitForAbort(runtime.signal)
-    await stopResource(scheduler)
-    await stopResource(slack)
+    let scheduler: StartedDaemonResource | undefined
+    try {
+      scheduler = starter.startScheduler(loaded.settings)
+      await waitForAbort(runtime.signal)
+    } finally {
+      if (scheduler !== undefined) {
+        await stopResource(scheduler)
+      }
+      await stopResource(slack)
+      slack = undefined
+    }
     emitLine(lines, runtime, "shutdown signal received")
     emitLine(lines, runtime, "clean shutdown")
     return daemonOk(lines, runtime)

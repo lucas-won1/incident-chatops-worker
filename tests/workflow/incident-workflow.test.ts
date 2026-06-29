@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest"
 
 import { buildPromptEnvelope } from "../../src/runner/prompt.js"
-import type { RunnerIncidentContext } from "../../src/runner/types.js"
 import { SlackActionIds } from "../../src/slack/action-payload.js"
-import { RecordingRunner, runnerResult } from "./incident-workflow-fakes.js"
-import { createWorkflow, detectedIncident, slackAction } from "./incident-workflow-support.js"
+import {
+  RecordingMergeRequestProvider,
+  RecordingRunner,
+  runnerResult,
+} from "./incident-workflow-fakes.js"
+import {
+  createWorkflow,
+  detailedSentryContext,
+  detectedIncident,
+  readSavedMrLinks,
+  slackAction,
+} from "./incident-workflow-support.js"
 
 const onlyRunnerRequest = (runner: RecordingRunner) => {
   const request = runner.calls[0]
@@ -13,43 +22,6 @@ const onlyRunnerRequest = (runner: RecordingRunner) => {
   }
   return request
 }
-
-const detailedSentryContext = {
-  events: [
-    {
-      culprit: "src/payment/checkout.ts",
-      dateCreated: "2026-06-26T00:00:30.000Z",
-      entries: [
-        {
-          data: {
-            values: [
-              {
-                stacktrace: {
-                  frames: [
-                    {
-                      filename: "src/payment/checkout.ts",
-                      function: "submitCheckout",
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-          type: "exception",
-        },
-      ],
-      eventID: "event-10",
-      message: "TypeError: Cannot read properties of undefined",
-      tags: [
-        ["environment", "production"],
-        ["release", "checkout@2026.06.26"],
-      ],
-      title: "Checkout submit crashed",
-    },
-  ],
-  issueId: "SENTRY-10",
-  trustBoundary: "untrusted_external_sentry",
-} satisfies RunnerIncidentContext
 
 describe("approval-gated incident workflow", () => {
   it("posts initial Slack buttons when a detected Sentry issue is new", async () => {
@@ -127,26 +99,82 @@ describe("approval-gated incident workflow", () => {
     store.close()
   })
 
-  it("runs approved fix through verification, push, MR creation, and result posting", async () => {
+  it("runs approved fix through verification, push, mr creation, persistence, and result posting", async () => {
     // Given: an analyzed incident and a passing fix result.
     const runner = new RecordingRunner([
       runnerResult({ mode: "analysis_only" }),
       runnerResult({ mode: "fix_and_mr", verificationResults: "passed" }),
     ])
-    const { mrProvider, repo, slack, store, workflow } = createWorkflow(runner)
+    const { dbPath, mrProvider, repo, slack, store, workflow } = createWorkflow(runner)
     await workflow.handleDetectedIncident(detectedIncident)
     await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
 
     // When: Slack approves the fix.
     await workflow.handleSlackAction(slackAction("fix_requested", SlackActionIds.fixAfterAnalysis))
 
-    // Then: verification precedes push/MR and Slack receives the MR link.
+    // Then: verification precedes push/MR and Slack receives the persisted GitLab MR link.
     expect(runner.calls.map((call) => call.mode)).toEqual(["analysis_only", "fix_and_mr"])
     expect(repo.pushRequests).toHaveLength(1)
     expect(mrProvider.calls).toHaveLength(1)
     expect(JSON.stringify(slack.messages.at(-1)?.blocks)).toContain(
       "https://gitlab.example/incidents/merge_requests/7",
     )
+    expect(readSavedMrLinks(dbPath)).toEqual([
+      {
+        provider: "gitlab",
+        url: "https://gitlab.example/incidents/merge_requests/7",
+      },
+    ])
+    store.close()
+  })
+
+  it("creates a github mr/pr through the provider contract and posts the pull request url", async () => {
+    // Given: a workflow using a provider implementation that identifies as GitHub.
+    const mrProvider = new RecordingMergeRequestProvider("github")
+    const runner = new RecordingRunner([
+      runnerResult({ mode: "analysis_only" }),
+      runnerResult({ mode: "fix_and_mr", verificationResults: "passed" }),
+    ])
+    const { dbPath, slack, store, workflow } = createWorkflow(runner, { mrProvider })
+    await workflow.handleDetectedIncident(detectedIncident)
+    await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
+
+    // When: Slack approves the fix and MR/PR creation completes.
+    await workflow.handleSlackAction(slackAction("fix_requested", SlackActionIds.fixAfterAnalysis))
+
+    // Then: persisted MR link metadata and Slack success text use the selected GitHub provider.
+    expect(readSavedMrLinks(dbPath)).toEqual([
+      {
+        provider: "github",
+        url: "https://github.example/incidents/pull/7",
+      },
+    ])
+    expect(JSON.stringify(slack.messages.at(-1)?.blocks)).toContain(
+      "https://github.example/incidents/pull/7",
+    )
+    store.close()
+  })
+
+  it("marks mr creation failed after push while retaining branch recovery metadata", async () => {
+    // Given: push succeeds but the selected provider rejects MR/PR creation after publication.
+    const runner = new RecordingRunner([runnerResult({ mode: "fix_and_mr" })])
+    const { mrProvider, repo, slack, store, workflow } = createWorkflow(runner)
+    mrProvider.failure = new Error("provider unavailable")
+    await workflow.handleDetectedIncident(detectedIncident)
+
+    // When: Slack approves the fix.
+    await workflow.handleSlackAction(slackAction("fix_requested", SlackActionIds.fixAndMr))
+
+    // Then: the branch remains available for retry and no misleading MR success is posted.
+    const slackOutput = JSON.stringify(slack.messages.at(-1))
+    expect(repo.pushRequests).toHaveLength(1)
+    expect(store.listAuditEntries().map((entry) => entry.action)).toContain(
+      "workflow.mr_failed_after_push",
+    )
+    expect(store.getIncidentByIssueId("SENTRY-10")?.workflowState).toBe("mr_failed_after_push")
+    expect(slackOutput).toContain("MR creation failed after push")
+    expect(slackOutput).toContain("incident/SENTRY-10")
+    expect(slackOutput).not.toContain("https://gitlab.example/incidents/merge_requests/7")
     store.close()
   })
 

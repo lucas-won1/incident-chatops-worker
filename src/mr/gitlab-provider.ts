@@ -35,6 +35,16 @@ const renderMergeRequestTemplate = (
     .replaceAll("{sourceBranch}", input.sourceBranch)
     .replaceAll("{targetBranch}", input.targetBranch)
 
+const gitLabDraftTitlePattern = /^(?:draft:|\[draft\]|\(draft\))/iu
+
+const mergeRequestTitle = (input: CreateMergeRequestInput): string => {
+  const title = renderMergeRequestTemplate(input.titleTemplate, input)
+  if (!input.draft || gitLabDraftTitlePattern.test(title)) {
+    return title
+  }
+  return `Draft: ${title}`
+}
+
 export const createGitLabMergeRequestProvider = (
   options: GitLabMergeRequestProviderOptions,
 ): MergeRequestProvider => {
@@ -51,6 +61,7 @@ export const createGitLabMergeRequestProvider = (
   })
 
   return {
+    provider: "gitlab",
     createMergeRequest: async (
       input: CreateMergeRequestInput,
     ): Promise<CreateMergeRequestResult> => {
@@ -59,6 +70,8 @@ export const createGitLabMergeRequestProvider = (
         draft: input.draft,
         labels: input.labels,
         project: options.project,
+        provider: "gitlab",
+        repository: options.project,
         sourceBranch: input.sourceBranch,
         targetBranch: input.targetBranch,
       })
@@ -68,11 +81,10 @@ export const createGitLabMergeRequestProvider = (
         {
           json: {
             description: renderMergeRequestTemplate(input.bodyTemplate, input),
-            draft: input.draft,
             labels: input.labels.join(","),
             source_branch: input.sourceBranch,
             target_branch: input.targetBranch,
-            title: renderMergeRequestTemplate(input.titleTemplate, input),
+            title: mergeRequestTitle(input),
           },
         },
       )
@@ -83,6 +95,8 @@ export const createGitLabMergeRequestProvider = (
           action: "merge_request.create.failed",
           kind,
           project: options.project,
+          provider: "gitlab",
+          repository: options.project,
           statusCode: response.status,
         })
         throw new GitLabMergeRequestApiError(kind, response.status)
@@ -94,6 +108,8 @@ export const createGitLabMergeRequestProvider = (
         options.audit?.({
           action: "merge_request.create.succeeded",
           project: options.project,
+          provider: "gitlab",
+          repository: options.project,
           statusCode: response.status,
           url: parsed.web_url,
         })
@@ -104,6 +120,8 @@ export const createGitLabMergeRequestProvider = (
             action: "merge_request.create.failed",
             kind: "parse",
             project: options.project,
+            provider: "gitlab",
+            repository: options.project,
             statusCode: response.status,
           })
           throw new GitLabMergeRequestParseError(response.status)

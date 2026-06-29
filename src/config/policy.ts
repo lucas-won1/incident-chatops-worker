@@ -4,14 +4,23 @@ import { parse as parseYaml } from "yaml"
 import { ZodError, z } from "zod"
 import type { WorkerEnv } from "./env.js"
 import { ConfigValidationError } from "./errors.js"
+import {
+  type GitHubConfig,
+  type GitLabConfig,
+  type GitProvider,
+  gitHubConfigSchema,
+  gitLabConfigSchema,
+  gitProviderSchema,
+  normalizeGitHubConfig,
+  normalizeGitLabConfig,
+} from "./provider.js"
 
 const secretKeyPattern = /(?:token|secret|password|credential|api[_-]?key|auth)/iu
-const secretValuePattern = /(?:xox[abprs]-|xapp-|glpat-|sntrys_|sentry[a-z0-9_-]*_)/iu
+const secretValuePattern =
+  /(?:xox[abprs]-|xapp-|glpat-|github_pat_|gh[opusr]_|sntrys_|sentry[a-z0-9_-]*_)/iu
 const safeId = /^[A-Za-z][A-Za-z0-9_-]*$/u
 const safeCommand = /^[A-Za-z0-9._/-]+$/u
 const safeBranchPrefix = /^[A-Za-z0-9][A-Za-z0-9._/-]*\/$/u
-const safeGitLabProject = /^[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]$/u
-const defaultGitLabLabels = ["incident-chatops"] as const
 
 const isPlainRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -78,27 +87,40 @@ const runnerDefinitionSchema = z.object({
   type: z.literal("generic"),
 })
 
-const gitLabProjectSchema = z.string().superRefine((value, context) => {
-  if (!safeGitLabProject.test(value) || value.includes("..") || value.includes("//")) {
-    context.addIssue({ code: "custom", message: "GitLab project path is unsafe" })
-  }
-})
-
 const policySchema = z
   .object({
     branch: z.object({
       prefix: branchPrefixSchema,
     }),
-    mr: z.object({
-      defaultTargetBranch: nonEmptyString,
-      gitlab: z.object({
-        baseUrl: z.url(),
-        defaultLabels: z.array(nonEmptyString).optional(),
-        draft: z.boolean().optional(),
-        project: gitLabProjectSchema,
+    mr: z
+      .object({
+        defaultTargetBranch: nonEmptyString,
+        github: gitHubConfigSchema.optional(),
+        gitlab: gitLabConfigSchema.optional(),
+        provider: gitProviderSchema.default("gitlab"),
+      })
+      .superRefine((value, context) => {
+        switch (value.provider) {
+          case "gitlab":
+            if (value.gitlab === undefined) {
+              context.addIssue({
+                code: "custom",
+                message: "GitLab routing is required when mr.provider is gitlab",
+                path: ["gitlab"],
+              })
+            }
+            return
+          case "github":
+            if (value.github === undefined) {
+              context.addIssue({
+                code: "custom",
+                message: "GitHub routing is required when mr.provider is github",
+                path: ["github"],
+              })
+            }
+            return
+        }
       }),
-      provider: z.literal("gitlab").default("gitlab"),
-    }),
     repos: z.object({
       allowlist: z.array(absoluteSafePath).min(1, "repo allowlist must not be empty"),
     }),
@@ -158,13 +180,9 @@ export type WorkerConfig = {
   readonly branchPrefix: string
   readonly mr: {
     readonly defaultTargetBranch: string
-    readonly gitlab: {
-      readonly baseUrl: string
-      readonly defaultLabels: readonly string[]
-      readonly draft: boolean
-      readonly project: string
-    }
-    readonly provider: "gitlab"
+    readonly github?: GitHubConfig
+    readonly gitlab?: GitLabConfig
+    readonly provider: GitProvider
   }
   readonly repos: {
     readonly allowlist: readonly string[]
@@ -209,17 +227,24 @@ export const parseWorkerConfigYaml = (source: string, _env: WorkerEnv): WorkerCo
 
   try {
     const parsed = policySchema.parse(rawYaml)
-    const gitlab = {
-      baseUrl: parsed.mr.gitlab.baseUrl,
-      defaultLabels: parsed.mr.gitlab.defaultLabels ?? defaultGitLabLabels,
-      draft: parsed.mr.gitlab.draft ?? false,
-      project: parsed.mr.gitlab.project,
-    }
+    const gitlab =
+      parsed.mr.gitlab === undefined
+        ? {}
+        : {
+            gitlab: normalizeGitLabConfig(parsed.mr.gitlab),
+          }
+    const github =
+      parsed.mr.github === undefined
+        ? {}
+        : {
+            github: normalizeGitHubConfig(parsed.mr.github),
+          }
     return {
       branchPrefix: parsed.branch.prefix,
       mr: {
         defaultTargetBranch: parsed.mr.defaultTargetBranch,
-        gitlab,
+        ...github,
+        ...gitlab,
         provider: parsed.mr.provider,
       },
       repos: {

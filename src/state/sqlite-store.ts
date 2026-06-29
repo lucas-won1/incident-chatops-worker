@@ -69,10 +69,26 @@ class SqliteStateStore {
   }
 
   public close(): void {
-    if (this.#accessMode === "write") {
-      persistDatabase(this.#db, this.#path)
+    let persistenceError: unknown
+    try {
+      if (this.#accessMode === "write") {
+        persistDatabase(this.#db, this.#path)
+      }
+    } catch (error) {
+      persistenceError = error
     }
-    this.#db.close()
+
+    try {
+      this.#db.close()
+    } catch (error) {
+      if (persistenceError === undefined) {
+        throw error
+      }
+    }
+
+    if (persistenceError !== undefined) {
+      throw persistenceError
+    }
   }
 
   public assertWritable(operation: string): void {

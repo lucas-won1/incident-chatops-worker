@@ -3,6 +3,7 @@ const tokenPatterns = [
   /xapp-[A-Za-z0-9-]+/g,
   /sntrys_[A-Za-z0-9_]+/g,
   /glpat-[A-Za-z0-9_-]+/g,
+  /github_pat_[A-Za-z0-9_]+/g,
   /gh[pousr]_[A-Za-z0-9_]+/g,
 ] as const
 

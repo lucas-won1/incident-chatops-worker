@@ -2,14 +2,10 @@ import ky from "ky"
 import { z } from "zod"
 
 import type { WorkerSettings } from "../config/index.js"
-import {
-  createGitLabMergeRequestProvider,
-  type GitLabMergeRequestProviderOptions,
-  type MergeRequestProvider,
-} from "../mr/index.js"
 import { LocalGitRepoAdapter } from "../repo/local-git.js"
 import { GitRunnerCleanChecker } from "../runner/clean-checker.js"
 import { CodexExecRunner } from "../runner/codex.js"
+import type { RunnerAdapter, RunnerRequest } from "../runner/types.js"
 import type { PollOnceOptions, PollOnceResult } from "../sentry/index.js"
 import { fetchIssueContext, pollOnce } from "../sentry/index.js"
 import { redactSensitiveText } from "../shared/redaction.js"
@@ -20,7 +16,21 @@ import type {
   SlackSocketModeOptions,
 } from "../slack/index.js"
 import { openSqliteStateStore } from "../state/sqlite-store.js"
-import { IncidentWorkflow, type WorkflowDetectedIncident } from "../workflow/index.js"
+import {
+  IncidentWorkflow,
+  type IncidentWorkflowOptions,
+  type WorkflowDetectedIncident,
+  type WorkflowRepoAdapter,
+  type WorkflowSlackPublisher,
+} from "../workflow/index.js"
+import {
+  createSelectedMergeRequestProvider,
+  daemonSecretValues,
+  type MergeRequestProviderFactory,
+  selectedMergeRequestDefaults,
+  selectedMergeRequestProviderOptions,
+  serviceTokenEnvNames,
+} from "./mr-provider-routing.js"
 
 type DaemonStateStore = ReturnType<typeof openSqliteStateStore>
 
@@ -39,14 +49,14 @@ export type DaemonPollOnce = (options: PollOnceOptions) => Promise<PollOnceResul
 
 export type SlackSocketModeFactory = (options: SlackSocketModeOptions) => SlackSocketModeAdapter
 
-export type GitLabMergeRequestProviderFactory = (
-  options: GitLabMergeRequestProviderOptions,
-) => MergeRequestProvider
-
 export type DaemonRuntimeDependencies = {
   readonly daemonWorkflowFactory?: DaemonWorkflowFactory
-  readonly mrProviderFactory?: GitLabMergeRequestProviderFactory
+  readonly mrProviderFactory?: MergeRequestProviderFactory
   readonly pollOnce?: DaemonPollOnce
+  readonly repo?: WorkflowRepoAdapter
+  readonly runner?: RunnerAdapter<RunnerRequest>
+  readonly sentryContext?: IncidentWorkflowOptions["sentryContext"]
+  readonly slack?: WorkflowSlackPublisher
   readonly slackSocketModeFactory?: SlackSocketModeFactory
   readonly writeStatus?: (line: string) => void
 }
@@ -56,13 +66,6 @@ const slackPostResponseSchema = z.object({
   ok: z.boolean(),
   ts: z.string().optional(),
 })
-
-const daemonSecrets = (settings: WorkerSettings): readonly string[] => [
-  settings.env.gitlabToken,
-  settings.env.sentryAuthToken,
-  settings.env.slackAppToken,
-  settings.env.slackBotToken,
-]
 
 const repoPathForIncident = (settings: WorkerSettings, repoId: string): string => {
   const projectIndex = settings.config.sentryProjects.findIndex(
@@ -120,36 +123,38 @@ const postSlackMessage = async (
 
 export const createProductionDaemonWorkflowRuntime = (
   settings: WorkerSettings,
-  dependencies: Pick<DaemonRuntimeDependencies, "mrProviderFactory"> = {},
+  dependencies: Pick<
+    DaemonRuntimeDependencies,
+    "mrProviderFactory" | "repo" | "runner" | "sentryContext" | "slack"
+  > = {},
 ): DaemonWorkflowRuntime => {
   const state = openSqliteStateStore({ path: settings.env.stateDbPath })
-  const createMrProvider = dependencies.mrProviderFactory ?? createGitLabMergeRequestProvider
+  const createMrProvider = dependencies.mrProviderFactory ?? createSelectedMergeRequestProvider
+  const providerOptions = selectedMergeRequestProviderOptions(settings)
+  const mrDefaults = selectedMergeRequestDefaults(settings)
   const workflow = new IncidentWorkflow({
     allowedRunnerCommands: settings.config.runners.genericCommandAllowlist,
     branchPrefix: settings.config.branchPrefix,
     defaultTargetBranch: settings.config.mr.defaultTargetBranch,
-    mrDefaults: {
-      draft: settings.config.mr.gitlab.draft,
-      labels: settings.config.mr.gitlab.defaultLabels,
-    },
-    mrProvider: createMrProvider({
-      baseUrl: settings.config.mr.gitlab.baseUrl,
-      project: settings.config.mr.gitlab.project,
-      token: settings.env.gitlabToken,
-    }),
+    mrDefaults,
+    mrProvider: createMrProvider(providerOptions),
     remoteName: "origin",
-    repo: new LocalGitRepoAdapter({
-      allowlist: settings.config.repos.allowlist,
-      branchPrefix: settings.config.branchPrefix,
-      worktreeRoot: settings.config.worktreeRoot,
-    }),
+    repo:
+      dependencies.repo ??
+      new LocalGitRepoAdapter({
+        allowlist: settings.config.repos.allowlist,
+        branchPrefix: settings.config.branchPrefix,
+        worktreeRoot: settings.config.worktreeRoot,
+      }),
     repoPaths: repoPathsByProject(settings),
-    runner: new CodexExecRunner({
-      cleanChecker: new GitRunnerCleanChecker(),
-      secretEnvNames: ["GITLAB_TOKEN", "SENTRY_AUTH_TOKEN", "SLACK_APP_TOKEN", "SLACK_BOT_TOKEN"],
-      secretValues: daemonSecrets(settings),
-    }),
-    sentryContext: {
+    runner:
+      dependencies.runner ??
+      new CodexExecRunner({
+        cleanChecker: new GitRunnerCleanChecker(),
+        secretEnvNames: serviceTokenEnvNames,
+        secretValues: daemonSecretValues(settings),
+      }),
+    sentryContext: dependencies.sentryContext ?? {
       fetchIssueContext: (incident) => {
         const project = sentryProjectForIncident(settings, incident.repoId)
         return fetchIssueContext({
@@ -160,8 +165,8 @@ export const createProductionDaemonWorkflowRuntime = (
         })
       },
     },
-    sentryContextSecretValues: daemonSecrets(settings),
-    slack: {
+    sentryContextSecretValues: daemonSecretValues(settings),
+    slack: dependencies.slack ?? {
       postMessage: (message) => postSlackMessage(settings, message),
     },
     state,
@@ -191,7 +196,7 @@ const recordDegradedPoll = (
   writeStatus: ((line: string) => void) | undefined,
   details: string,
 ): void => {
-  const safeDetails = redactSensitiveText(details, daemonSecrets(settings))
+  const safeDetails = redactSensitiveText(details, daemonSecretValues(settings))
   writeStatus?.(`Sentry polling scheduler: degraded ${safeDetails}`)
   store?.appendAuditEntry({
     actor: "daemon",
@@ -225,7 +230,7 @@ export const runDaemonPollOnce = async (
         await workflow.handleDetectedIncident(detectedWorkflowIncident(settings, incident))
       },
       projects: settings.config.sentryProjects,
-      secretRedactionValues: daemonSecrets(settings),
+      secretRedactionValues: daemonSecretValues(settings),
       store,
     })
     if (result.status === "degraded") {

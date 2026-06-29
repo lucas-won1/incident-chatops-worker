@@ -18,7 +18,7 @@ export type ReachabilityStatus =
     }
 
 export type ReachabilityReport = {
-  readonly gitlab: ReachabilityStatus
+  readonly gitProvider: ReachabilityStatus
   readonly sentry: ReachabilityStatus
   readonly slackApp: ReachabilityStatus
   readonly slackBot: ReachabilityStatus
@@ -41,6 +41,7 @@ const slackSocketModeOpenSchema = z.object({
 
 const safeMessage = (message: string, settings: WorkerSettings): string =>
   redactSensitiveText(message, [
+    settings.env.githubToken,
     settings.env.gitlabToken,
     settings.env.sentryAuthToken,
     settings.env.slackAppToken,
@@ -49,6 +50,46 @@ const safeMessage = (message: string, settings: WorkerSettings): string =>
 
 const statusText = (status: ReachabilityStatus, settings: WorkerSettings): string =>
   `reachability ${status.kind}: ${safeMessage(status.message, settings)}`
+
+const assertNeverProvider = (provider: never): never => {
+  throw new ConfigValidationError(`Unsupported merge request provider: ${provider}`)
+}
+
+const gitProviderTokenLabel = (settings: WorkerSettings): string => {
+  switch (settings.config.mr.provider) {
+    case "gitlab":
+      return "GitLab token"
+    case "github":
+      return "GitHub token"
+    default:
+      return assertNeverProvider(settings.config.mr.provider)
+  }
+}
+
+const gitProviderReachabilityConfig = (
+  settings: WorkerSettings,
+): {
+  readonly service: "GitHub" | "GitLab"
+  readonly tokenHeader: Readonly<Record<string, string>>
+  readonly url: string
+} => {
+  switch (settings.config.mr.provider) {
+    case "gitlab":
+      return {
+        service: "GitLab",
+        tokenHeader: { "private-token": settings.env.gitlabToken },
+        url: `${(settings.config.mr.gitlab?.baseUrl ?? "https://gitlab.com/api/v4").replace(/\/$/u, "")}/user`,
+      }
+    case "github":
+      return {
+        service: "GitHub",
+        tokenHeader: { authorization: `Bearer ${settings.env.githubToken}` },
+        url: `${(settings.config.mr.github?.baseUrl ?? "https://api.github.com").replace(/\/$/u, "")}/user`,
+      }
+    default:
+      return assertNeverProvider(settings.config.mr.provider)
+  }
+}
 
 const authenticatedGet = async (
   url: string,
@@ -112,7 +153,8 @@ const warningFromError = (service: string, error: unknown): ReachabilityStatus =
 export const checkTokenReachability: ReachabilityChecker = async (
   settings,
 ): Promise<ReachabilityReport> => {
-  const [slackBot, slackApp, sentry, gitlab] = await Promise.all([
+  const gitProviderConfig = gitProviderReachabilityConfig(settings)
+  const [slackBot, slackApp, sentry, gitProvider] = await Promise.all([
     checkSlackBotReachability(settings).catch((error: unknown) =>
       warningFromError("Slack bot", error),
     ),
@@ -128,17 +170,15 @@ export const checkTokenReachability: ReachabilityChecker = async (
           : { kind: "warning" as const, message: `organizations probe HTTP ${status}` },
       )
       .catch((error: unknown) => warningFromError("Sentry", error)),
-    authenticatedGet("https://gitlab.com/api/v4/user", {
-      "private-token": settings.env.gitlabToken,
-    })
+    authenticatedGet(gitProviderConfig.url, gitProviderConfig.tokenHeader)
       .then((status) =>
         status === 200
           ? { kind: "ok" as const, message: "user probe HTTP 200" }
           : { kind: "warning" as const, message: `user probe HTTP ${status}` },
       )
-      .catch((error: unknown) => warningFromError("GitLab", error)),
+      .catch((error: unknown) => warningFromError(gitProviderConfig.service, error)),
   ])
-  return { gitlab, sentry, slackApp, slackBot }
+  return { gitProvider, sentry, slackApp, slackBot }
 }
 
 const fakeReachability = "reachability skipped in fake mode"
@@ -163,16 +203,17 @@ export const runDoctorCommand = async (
       reachability === undefined
         ? fakeReachability
         : statusText(reachability.sentry, loaded.settings)
-    const gitlabStatus =
+    const gitProviderStatus =
       reachability === undefined
         ? fakeReachability
-        : statusText(reachability.gitlab, loaded.settings)
+        : statusText(reachability.gitProvider, loaded.settings)
+    const gitProviderLabel = gitProviderTokenLabel(loaded.settings)
     const exitCode =
       reachability === undefined ||
       (reachability.slackBot.kind === "ok" &&
         reachability.slackApp.kind === "ok" &&
         reachability.sentry.kind === "ok" &&
-        reachability.gitlab.kind === "ok")
+        reachability.gitProvider.kind === "ok")
         ? 0
         : 1
     const stdout = `Config valid
@@ -184,7 +225,7 @@ Runner definitions: ${loaded.settings.config.runners.definitions.length}
 Slack bot token: present (${slackBotStatus})
 Slack app token: present (${slackAppStatus})
 Sentry token: present (${sentryStatus})
-GitLab token: present (${gitlabStatus})
+${gitProviderLabel}: present (${gitProviderStatus})
 Secrets: loaded from env only (redacted)
 ${exampleMode ? "Example mode: sample values expected; token reachability checks skipped\n" : ""}`
     return { ...ok(stdout), exitCode }

@@ -13,6 +13,33 @@ export type WorkerSettingsFiles = {
   readonly envFilePath?: string
 }
 
+const hasToken = (value: string): boolean => value.length > 0
+
+const assertNever = (value: never): never => {
+  throw new ConfigValidationError(`Unsupported merge request provider: ${value}`)
+}
+
+const validateSelectedProviderToken = (config: WorkerConfig, env: WorkerEnv): void => {
+  switch (config.mr.provider) {
+    case "gitlab":
+      if (!hasToken(env.gitlabToken)) {
+        throw new ConfigValidationError(
+          "GITLAB_TOKEN must be set in env when mr.provider is gitlab",
+        )
+      }
+      return
+    case "github":
+      if (!hasToken(env.githubToken)) {
+        throw new ConfigValidationError(
+          "GITHUB_TOKEN must be set in env when mr.provider is github",
+        )
+      }
+      return
+    default:
+      assertNever(config.mr.provider)
+  }
+}
+
 const envKeyPattern = /^[A-Za-z_][A-Za-z0-9_]*$/u
 
 export const parseEnvFile = (source: string): Readonly<Record<string, string>> => {
@@ -57,6 +84,7 @@ export const loadWorkerSettings = (files: WorkerSettingsFiles): WorkerSettings =
     files.envFilePath === undefined ? {} : parseEnvFile(readTextFile(files.envFilePath))
   const env = parseWorkerEnv({ ...process.env, ...envFromFile })
   const config = parseWorkerConfigYaml(readTextFile(files.configPath), env)
+  validateSelectedProviderToken(config, env)
 
   return { config, env }
 }

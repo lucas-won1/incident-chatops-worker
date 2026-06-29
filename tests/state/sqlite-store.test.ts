@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -71,6 +71,20 @@ describe("SQLite state store", () => {
     expect(firstVersion).toBeGreaterThan(0)
     expect(second.getSchemaVersion()).toBe(firstVersion)
     second.close()
+  })
+
+  it("closes the database when close persistence fails", () => {
+    // Given: a migrated writable store whose database path becomes unwritable before close.
+    const dbPath = createTempDbPath()
+    const store = openSqliteStateStore({ path: dbPath })
+    rmSync(dbPath)
+    mkdirSync(dbPath)
+
+    // When: close attempts to persist to the invalid database path.
+    expect(() => store.close()).toThrow()
+
+    // Then: the underlying sql.js database was still closed after the persist failure.
+    expect(() => store.getSchemaVersion()).toThrow()
   })
 
   it("persists and retrieves Sentry issue snapshots and verification summaries across reopen", () => {

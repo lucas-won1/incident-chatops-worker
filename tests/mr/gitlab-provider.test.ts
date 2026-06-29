@@ -25,7 +25,6 @@ type GitLabTestServer = {
 
 const mergeRequestBodySchema = z.object({
   description: z.string(),
-  draft: z.boolean(),
   labels: z.string(),
   source_branch: z.string(),
   target_branch: z.string(),
@@ -113,7 +112,7 @@ afterEach(async () => {
 })
 
 describe("GitLab merge request provider", () => {
-  it("creates a merge request with rendered templates, branches, labels, draft flag, and safe audit events", async () => {
+  it("creates a draft merge request with a title prefix and no unsupported draft body field", async () => {
     // Given: a GitLab API fake and a provider configured with an env-sourced token.
     const server = await startGitLabServer(201, {
       web_url: "https://gitlab.example/acme/shop/-/merge_requests/42",
@@ -147,12 +146,85 @@ describe("GitLab merge request provider", () => {
     expect(server.requests[0]?.headers["private-token"]).toBe("glpat-secret-example")
     expect(mergeRequestBodySchema.parse(server.requests[0]?.body)).toEqual({
       description: "Incident fix body for incident/demo into main.",
-      draft: true,
       labels: "incident,automated",
       source_branch: "incident/demo",
       target_branch: "main",
-      title: "Fix incident/demo",
+      title: "Draft: Fix incident/demo",
     })
+    expect(JSON.stringify(server.requests[0]?.body)).not.toContain('"draft"')
+    expect(JSON.stringify(auditEvents)).not.toContain("glpat-secret-example")
+    expect(JSON.stringify(auditEvents)).not.toContain("private-token")
+  })
+
+  it("keeps an existing GitLab draft title prefix instead of duplicating it", async () => {
+    // Given: the title template already encodes GitLab's documented draft marker.
+    const server = await startGitLabServer(201, {
+      web_url: "https://gitlab.example/acme/shop/-/merge_requests/43",
+    })
+    servers.push(server)
+    const provider = createGitLabMergeRequestProvider({
+      baseUrl: server.baseUrl,
+      project: "acme/shop",
+      token: "glpat-secret-example",
+    })
+
+    // When: the provider creates a draft MR from a prefixed template.
+    await provider.createMergeRequest({
+      bodyTemplate: "body",
+      draft: true,
+      labels: [],
+      sourceBranch: "incident/demo",
+      targetBranch: "main",
+      titleTemplate: "[Draft] Fix {sourceBranch}",
+    })
+
+    // Then: the existing marker is retained and no duplicate marker is added.
+    expect(mergeRequestBodySchema.parse(server.requests[0]?.body).title).toBe(
+      "[Draft] Fix incident/demo",
+    )
+    expect(JSON.stringify(server.requests[0]?.body)).not.toContain('"draft"')
+  })
+
+  it("exposes GitLab provider identity and repository-safe audit metadata", async () => {
+    // Given: a GitLab provider with audit capture enabled.
+    const server = await startGitLabServer(201, {
+      web_url: "https://gitlab.example/acme/shop/-/merge_requests/42",
+    })
+    servers.push(server)
+    const auditEvents: MergeRequestAuditEvent[] = []
+    const provider = createGitLabMergeRequestProvider({
+      audit: (event) => {
+        auditEvents.push(event)
+      },
+      baseUrl: server.baseUrl,
+      project: "acme/shop",
+      token: "glpat-secret-example",
+    })
+
+    // When: the provider creates an MR.
+    await provider.createMergeRequest({
+      bodyTemplate: "body",
+      draft: true,
+      labels: ["incident"],
+      sourceBranch: "incident/demo",
+      targetBranch: "main",
+      titleTemplate: "title",
+    })
+
+    // Then: provider and repository identity are explicit while token/header details stay out of audit.
+    expect(provider.provider).toBe("gitlab")
+    expect(auditEvents).toEqual([
+      expect.objectContaining({
+        action: "merge_request.create.requested",
+        provider: "gitlab",
+        repository: "acme/shop",
+      }),
+      expect.objectContaining({
+        action: "merge_request.create.succeeded",
+        provider: "gitlab",
+        repository: "acme/shop",
+      }),
+    ])
     expect(JSON.stringify(auditEvents)).not.toContain("glpat-secret-example")
     expect(JSON.stringify(auditEvents)).not.toContain("private-token")
   })

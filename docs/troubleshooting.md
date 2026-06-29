@@ -240,11 +240,11 @@ node dist/cli.js logs --db <state-db-path>
 
 - 해결: runner command와 인자를 줄이고, 필요한 env만 allowlist로 전달합니다. stderr는 redaction 후 저장되지만 private log 전문을 공유하지 않습니다.
 
-## verification, push, MR
+## verification, push, MR/PR
 
 ### `verification failed`로 push 전 중단
 
-- 증상: Slack thread에 `verification failed`가 표시되고 Git push 또는 MR 생성이 일어나지 않습니다.
+- 증상: Slack thread에 `verification failed`가 표시되고 Git push 또는 MR/PR 생성이 일어나지 않습니다.
 - 원인: `fix_and_mr` runner 결과의 `verificationResults`가 통과로 해석되지 않았습니다.
 - 확인:
 
@@ -257,14 +257,15 @@ node dist/cli.js logs --db <state-db-path>
 ### `MR creation failed after push`
 
 - 증상: Slack thread에 `MR creation failed after push. Branch retained for retry: ...`가 표시됩니다.
-- 원인: verification은 통과했고 branch push도 끝났지만, GitLab Merge Request 생성 API가 실패했습니다.
+- 원인: verification은 통과했고 branch push도 끝났지만, Git provider MR/PR REST API 호출이 실패했습니다.
 - 확인:
 
 ```bash
 node dist/cli.js logs --db <state-db-path>
 ```
 
-- 해결: GitLab token 권한, `mr.gitlab.baseUrl`, `mr.gitlab.project`, target branch, project 접근 권한을 확인합니다. 이미 push된 branch는 message와 audit의 branch 이름으로 찾아 MR 생성을 재시도하거나 수동 복구합니다.
+- 해결: selected provider token의 MR/PR API 권한, `mr.gitlab.*` 또는 `mr.github.*` 정책, target/base branch, project/repository 접근 권한을 확인합니다. Branch 인증은 provider token이 아니라 로컬 git remote credential을 확인합니다.
+- 이미 push된 branch는 message와 audit의 branch 이름으로 찾아 MR/PR 생성을 재시도하거나 수동 복구합니다.
 
 ## SQLite state와 audit
 
@@ -282,7 +283,7 @@ node dist/cli.js status --env-file .env --config incident-worker.config.yaml
 node dist/cli.js logs --db <state-db-path>
 ```
 
-- 해결: `.env`의 `STATE_DB_PATH`가 쓰기 가능한 로컬 경로인지 확인합니다. 처음 실행이면 `daemon`, `daemon --once`, `run-once`처럼 write path를 한 번 실행해 DB와 migration을 만들고, 그 다음 `status`와 `logs`를 확인합니다.
+- 해결: `STATE_DB_PATH`를 설정했다면 그 경로가 쓰기 가능한 로컬 경로인지 확인합니다. 생략했다면 OS별 automatic durable state path의 parent directory를 확인합니다. 처음 실행이면 `daemon`, `daemon --once`, `run-once`처럼 write path를 한 번 실행해 DB와 migration을 만들고, 그 다음 `status`와 `logs`를 확인합니다.
 
 ### audit/log inspection
 
@@ -312,12 +313,12 @@ node dist/cli.js dev validate-docs
 node dist/cli.js dev verify-scope --strict --plan docs-plan.md
 ```
 
-- 해결: 실패 label이 가리키는 문서나 예시 파일만 수정합니다. webhook, GitHub provider, GUI, hosted control plane, unsafe command execution을 지원되는 기능처럼 쓰지 않습니다.
+- 해결: 실패 label이 가리키는 문서나 예시 파일만 수정합니다. webhook, future Git providers, GUI, hosted control plane, unsafe command execution을 운영 기능처럼 문서화하지 않습니다. GitHub provider는 현재 REST API provider이므로 future provider TODO와 구분합니다.
 
 ### raw secret scan failures
 
 - 증상: `validate-docs` 또는 `verify-scope`가 `FAIL no raw secret patterns`를 출력합니다.
-- 원인: README, example config, source, public docs 중 하나에 Slack/Sentry/GitLab token-looking 문자열이 들어갔습니다.
+- 원인: README, example config, source, public docs 중 하나에 Slack/Sentry/GitLab/GitHub token-looking 문자열이 들어갔습니다.
 - 확인:
 
 ```bash

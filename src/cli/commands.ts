@@ -32,8 +32,12 @@ export const runStatusCommand = (args: readonly string[]): CliResult => {
       path: dbPath,
       createIfMissing: false,
     })
-    const schemaVersion = schemaStore.getSchemaVersion()
-    schemaStore.close()
+    let schemaVersion: number
+    try {
+      schemaVersion = schemaStore.getSchemaVersion()
+    } finally {
+      schemaStore.close()
+    }
     const incidents = countTable(dbPath, "SELECT COUNT(*) AS count FROM incidents")
     const activeJobs = countTable(
       dbPath,

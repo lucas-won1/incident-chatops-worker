@@ -12,16 +12,16 @@
 
 ## 비밀값과 설정
 
-- 비밀값은 env-only입니다. `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `SENTRY_AUTH_TOKEN`, `GITLAB_TOKEN` 같은 값은 `.env` 또는 프로세스 환경에만 둡니다.
+- 비밀값은 env-only입니다. `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `SENTRY_AUTH_TOKEN`, `GITLAB_TOKEN`, `GITHUB_TOKEN` 같은 값은 `.env` 또는 프로세스 환경에만 둡니다.
 - YAML secret은 거부됩니다. YAML 설정에 `token`, `secret`, `password`, `credential`, `api_key`, `auth` 같은 secret-looking key가 있거나 token-looking value가 있으면 설정 로딩이 실패합니다.
-- YAML은 비밀이 아닌 정책만 담습니다. 예: Sentry project mapping, Slack channel routing, repo allowlist, worktree root, branch prefix, command allowlist, GitLab project/base URL/default labels/draft/target branch.
+- YAML은 비밀이 아닌 정책만 담습니다. 예: Sentry project mapping, Slack channel routing, repo allowlist, worktree root, branch prefix, command allowlist, GitLab/GitHub project or repository metadata, base URL, default labels, draft flag, target branch.
 - 공개 문서, evidence, issue, Slack 메시지에 실제 토큰, auth header, cookie, private log, PII를 붙여 넣지 않습니다.
 
 ## 승인과 실행 경계
 
 - Slack approval 없이는 runner가 실행되지 않습니다. 감지 단계는 Slack 메시지를 만들고 상태를 저장하는 단계이며, repository mutation을 하지 않습니다.
 - `analysis_only`는 분석 전용입니다. commit, push, MR/PR 생성 같은 mutation 의도는 차단됩니다.
-- `fix_and_mr`도 무제한 실행이 아닙니다. 허용된 저장소 worktree에서 실행되고, 검증 결과가 통과해야 push와 GitLab MR 생성으로 넘어갑니다.
+- `fix_and_mr`도 무제한 실행이 아닙니다. 허용된 저장소 worktree에서 실행되고, 검증 결과가 통과해야 push와 Git provider MR/PR 생성으로 넘어갑니다.
 - repo allowlist는 절대 경로 기준입니다. allowlist 밖의 repository나 realpath가 다른 경로는 거부되어야 합니다.
 - branch prefix는 설정된 prefix를 따라야 합니다. traversal, 중복 separator, 위험한 branch 모양은 허용하지 않습니다.
 - command allowlist는 generic runner의 실행 파일 이름을 제한합니다. allowlist에 없는 command는 실행하지 않습니다.
@@ -30,7 +30,7 @@
 
 - runner child env는 최소화됩니다. 기본 child process에는 `PATH`, `HOME`, `CODEX_HOME`처럼 허용된 환경만 전달하고, 서비스 토큰 환경 변수는 전달하지 않습니다.
 - 토큰 redaction은 별도로 유지됩니다. child env에 토큰을 넘기지 않더라도, runner output, stdout, stderr, parsed result에서 env-only secret value가 보이면 `[REDACTED]`로 마스킹합니다.
-- redaction은 Slack/Sentry/GitLab 계열 token-looking pattern과 설정에서 전달된 정확한 secret value를 대상으로 합니다.
+- redaction은 Slack/Sentry/GitLab/GitHub 계열 token-looking pattern과 설정에서 전달된 정확한 secret value를 대상으로 합니다.
 - Sentry polling snapshot과 fetched Sentry context는 runner request, prompt, SQLite 저장 전에 redaction을 거칩니다. object key 위치에 들어간 secret value도 마스킹 대상입니다.
 - audit log details는 저장 전에 redaction과 길이 제한을 거칩니다.
 
@@ -40,11 +40,12 @@
 - `status`, `logs`, daemon degraded polling 메시지, Slack status message는 secret value가 노출되지 않도록 redaction된 내용을 사용해야 합니다.
 - SQLite 파일은 운영자가 관리하는 로컬 파일입니다. 백업, 권한, 보관 기간은 운영 환경 기준으로 정하고, 공개 저장소나 공유 채널에 업로드하지 않습니다.
 
-## GitLab token 최소화
+## Git provider token 최소화
 
-- GitLab token은 GitLab MR provider가 허용된 project에 branch push와 MR 생성을 수행하는 데 필요한 최소 권한으로 발급합니다.
+- Git provider token은 MR/PR API 호출에 필요한 최소 권한으로 발급합니다.
+- Branch push는 로컬 git remote credential이 처리합니다.
 - 가능하면 전용 계정이나 제한된 project/group membership을 사용하고, 개인의 광범위한 권한을 가진 token을 재사용하지 않습니다.
-- GitLab API base URL, project path, default label, draft 여부, target branch는 YAML 정책입니다. GitLab token 자체는 env-only로 유지합니다.
+- GitLab/GitHub API base URL, project or repository identifier, default label, draft 여부, target branch는 YAML 정책입니다. Git provider token 자체는 env-only로 유지합니다.
 - MR 생성 실패, push 이후 실패, API 오류를 기록할 때도 token value나 auth header를 로그에 남기지 않습니다.
 
 ## 프롬프트 인젝션 대응
@@ -59,9 +60,9 @@
 현재 MVP에서 다음 surface는 지원되는 운영 경로가 아닙니다.
 
 - 공개 webhook server 또는 Sentry webhook setup. webhook 기본값은 없습니다.
-- GitHub PR provider.
+- Bitbucket, Gitea/Forgejo/Codeberg, Azure DevOps Repos, AWS CodeCommit, Gerrit provider.
 - GUI dashboard 또는 hosted control plane.
-- live Slack/Sentry/GitLab credential QA.
+- live Slack/Sentry/Git provider credential QA.
 - Sentry 감지 즉시 자동 수정, 자동 commit, 자동 push, 자동 MR 생성.
 - allowlist를 우회하는 command runner, shell wrapper, 위험한 Codex override flag.
 
@@ -73,7 +74,7 @@
 - [ ] `repos.allowlist`에는 필요한 절대 경로만 넣고, 공유/임시/불명확한 경로를 넣지 않는다.
 - [ ] `branch prefix`는 incident 전용 prefix로 두고, 다른 자동화와 충돌하지 않게 관리한다.
 - [ ] `command allowlist`에는 필요한 runner command만 등록하고, shell interpreter나 wrapper를 넣지 않는다.
-- [ ] GitLab token은 최소 권한으로 만들고, 주기적으로 교체한다.
+- [ ] Git provider token은 MR/PR API 호출 최소 권한으로 만들고, 주기적으로 교체한다.
 - [ ] `status`, `logs`, SQLite audit log를 점검할 때 `[REDACTED]`가 유지되는지 확인한다.
 - [ ] Sentry/Slack 내용은 prompt injection 가능성이 있는 외부 입력으로 보고, 승인 전에 의심스러운 지시문을 확인한다.
 - [ ] 공개 저장소에 올리기 전 raw secret scan과 scope verification을 실행한다.

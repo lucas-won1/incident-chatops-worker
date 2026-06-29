@@ -23,6 +23,7 @@ const validEnv = {
   SENTRY_AUTH_TOKEN: "sntrys_redacted_example",
   SLACK_APP_TOKEN: "xapp-redacted-example",
   SLACK_BOT_TOKEN: "xoxb-redacted-example",
+  STATE_DB_PATH: join(tmpdir(), "incident-sentry-default-state.sqlite"),
 }
 
 const createTempDir = (): string => {

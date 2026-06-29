@@ -13,7 +13,7 @@ cp .env.example .env
 cp incident-worker.config.example.yaml incident-worker.config.yaml
 ```
 
-`.env`에는 Slack, Sentry, GitLab 토큰과 운영 값을 넣는다. `incident-worker.config.yaml`에는 Sentry 프로젝트 매핑, Slack 채널, repo allowlist, worktree root, runner allowlist, GitLab MR 정책처럼 비밀이 아닌 정책만 둔다. 실제 토큰, auth header, cookie 값을 YAML이나 문서에 넣지 않는다.
+`.env`에는 Slack, Sentry, selected Git provider 토큰과 운영 값을 넣는다. `incident-worker.config.yaml`에는 Sentry 프로젝트 매핑, Slack 채널, repo allowlist, worktree root, runner allowlist, Git provider MR/PR 정책처럼 비밀이 아닌 정책만 둔다. 실제 토큰, auth header, cookie 값을 YAML이나 문서에 넣지 않는다.
 
 첫 점검은 `doctor`로 한다.
 
@@ -55,14 +55,14 @@ node dist/cli.js daemon --env-file .env --config incident-worker.config.yaml --o
 
 ```bash
 node dist/cli.js status --env-file .env --config incident-worker.config.yaml
-node dist/cli.js logs --db .omo/state.sqlite
+node dist/cli.js logs --env-file .env --config incident-worker.config.yaml
 ```
 
 `status`는 `SQLite: ok`, connection mode, `polling: interval 300s`, incident/job 카운트를 보여준다. `logs`는 SQLite audit row를 시간, actor, action, job 상태 전이, details 형식으로 출력한다. 아직 감사 row가 없으면 `No audit entries`가 정상 empty-state다.
 
 ## fake와 example mode
 
-`FAKE_MODE=1`과 `doctor --example-mode`는 운영 전 검증 전용이다. fake mode는 live Slack/Sentry/GitLab credential 없이 CLI 경로와 SQLite 쓰기를 확인할 때만 사용한다. fake mode에서 통과한 결과는 실제 토큰 권한, Slack 앱 설치, Sentry 조직 접근, GitLab MR 권한을 증명하지 않는다.
+`FAKE_MODE=1`과 `doctor --example-mode`는 운영 전 검증 전용이다. fake mode는 live Slack/Sentry/Git provider credential 없이 CLI 경로와 SQLite 쓰기를 확인할 때만 사용한다. fake mode에서 통과한 결과는 실제 토큰 권한, Slack 앱 설치, Sentry 조직 접근, Git provider MR/PR 권한을 증명하지 않는다.
 
 테스트 fixture는 운영 설정이 아니다. 공개 운영자는 `.env.example`과 `incident-worker.config.example.yaml`을 복사한 뒤 자기 환경에 맞게 수정한다.
 
@@ -114,16 +114,17 @@ daemon poll이 실패하거나 Sentry가 backoff를 요구하면 결과는 `degr
 
 ## State DB와 SQLite 권한
 
-상태 DB 위치는 `.env`의 `STATE_DB_PATH`가 정한다. 예제 기본값은 `.omo/state.sqlite`이지만, 운영 호스트에서는 백업과 권한 관리가 쉬운 로컬 경로를 선택한다.
+`STATE_DB_PATH`를 생략하면 worker는 OS별 durable state 경로를 자동으로 사용한다. macOS는 `$HOME/Library/Application Support/incident-chatops-worker/state.sqlite`, Linux는 `${XDG_STATE_HOME:-$HOME/.local/state}/incident-chatops-worker/state.sqlite`, Windows는 `%LOCALAPPDATA%\incident-chatops-worker\state.sqlite`를 사용한다. `.env`의 `STATE_DB_PATH`는 선택 override이며, 설정하면 자동 경로보다 우선한다.
 
-SQLite 파일에는 incident, job, audit 상태가 저장된다. state store는 DB 파일을 owner-only 권한인 `0600`으로 만들고, 기존 파일이 group-readable처럼 넓은 권한이면 open 시 owner-only로 복구한다. 운영자는 DB 파일과 상위 디렉터리가 같은 사용자 계정에서 읽고 쓸 수 있는지 확인한다.
+SQLite 파일에는 incident, job, audit 상태가 저장된다. state store는 DB 파일을 owner-only 권한인 `0600`으로 만들고, 기존 파일이 group-readable처럼 넓은 권한이면 open 시 owner-only로 복구한다. 운영자는 DB 파일과 상위 디렉터리가 같은 사용자 계정에서 읽고 쓸 수 있는지 확인한다. 운영 모델은 single-daemon-per-state-DB이다. 같은 state DB를 여러 daemon이 동시에 공유하지 않는다.
 
 ```bash
 node dist/cli.js status --env-file .env --config incident-worker.config.yaml
+node dist/cli.js logs --env-file .env --config incident-worker.config.yaml
 node dist/cli.js logs --db "$STATE_DB_PATH"
 ```
 
-셸에서 `STATE_DB_PATH`가 export되어 있지 않다면 `.env`의 실제 경로를 `--db`에 직접 넣는다.
+`logs --db`는 직접 지정한 SQLite 파일을 읽는 override이다. 일반 운영에서는 `logs --env-file --config`가 daemon/status와 같은 automatic-or-overridden state DB 경로를 resolve한다.
 
 ## Audit review
 
@@ -139,19 +140,20 @@ node dist/cli.js logs --db "$STATE_DB_PATH"
 backup은 daemon을 멈춘 뒤 SQLite state DB와 운영 config를 함께 복사하는 방식이 가장 단순하다. `.env`는 비밀 파일이므로 암호화된 비밀 저장소나 운영 표준 백업 절차에 따르고, 일반 문서 저장소에 올리지 않는다.
 
 ```bash
-cp .omo/state.sqlite backups/state.sqlite
+node dist/cli.js logs --env-file .env --config incident-worker.config.yaml
+cp <resolved-state-db-path> backups/state.sqlite
 cp incident-worker.config.yaml backups/incident-worker.config.yaml
 ```
 
-restore는 daemon이 꺼진 상태에서 백업 DB를 `STATE_DB_PATH` 위치로 되돌리고 권한을 owner-only로 맞춘 뒤 `status`로 확인한다.
+restore는 daemon이 꺼진 상태에서 백업 DB를 resolved state DB 위치로 되돌리고 권한을 owner-only로 맞춘 뒤 `status`로 확인한다. `STATE_DB_PATH`를 설정한 운영은 그 override 위치를 쓰고, 생략한 운영은 OS별 automatic durable path를 쓴다.
 
 ```bash
-cp backups/state.sqlite .omo/state.sqlite
-chmod 600 .omo/state.sqlite
+cp backups/state.sqlite <resolved-state-db-path>
+chmod 600 <resolved-state-db-path>
 node dist/cli.js status --env-file .env --config incident-worker.config.yaml
 ```
 
-복구 후에는 `logs`로 마지막 audit 상태를 확인하고, pending job이나 pending Slack thread가 있으면 중복 대응이 생기지 않도록 Slack thread와 GitLab MR 상태를 대조한다.
+복구 후에는 `logs`로 마지막 audit 상태를 확인하고, pending job이나 pending Slack thread가 있으면 중복 대응이 생기지 않도록 Slack thread와 Git provider MR/PR 상태를 대조한다.
 
 ## Upgrade와 rebuild
 
@@ -174,7 +176,7 @@ runner가 사용하는 worktree root는 config의 `worktree.root`가 정한다. 
 cleanup 전에는 반드시 다음을 확인한다.
 
 - 해당 worktree에서 실행 중인 job이 없는지 `status`와 `logs`로 확인한다.
-- GitLab MR 또는 Slack thread에 필요한 변경이 이미 push되었는지 확인한다.
+- Git provider MR/PR 또는 Slack thread에 필요한 변경이 이미 push되었는지 확인한다.
 - dirty worktree를 삭제해도 되는지 운영자가 판단한다.
 
 state cleanup은 더 보수적으로 한다. SQLite DB를 삭제하면 seen incident, job, audit history가 사라져 중복 Slack thread나 대응 이력 손실이 생길 수 있다. 테스트용 state만 삭제하고, 운영 state는 backup을 만든 뒤 restore 경로까지 확인한 다음 정리한다.
