@@ -108,7 +108,32 @@ CREATE INDEX IF NOT EXISTS verification_summaries_incident_latest
 ON verification_summaries(incident_id, created_at DESC);
 ` as const
 
-export const latestSchemaVersion = 2
+const migrationThree = `
+CREATE TABLE IF NOT EXISTS incident_handoffs (
+  handoff_id TEXT PRIMARY KEY,
+  incident_id TEXT NOT NULL REFERENCES incidents(incident_id),
+  sentry_issue_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  repo_path TEXT NOT NULL,
+  job_id TEXT NOT NULL REFERENCES jobs(job_id),
+  provider TEXT NOT NULL,
+  mr_url TEXT NOT NULL,
+  source_branch TEXT NOT NULL,
+  target_branch TEXT NOT NULL,
+  head_sha TEXT NOT NULL,
+  analysis_summary TEXT NOT NULL,
+  changes_summary TEXT NOT NULL,
+  verification_summary TEXT NOT NULL,
+  mr_readiness TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  follow_up_prompt TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS incident_handoffs_issue_latest
+ON incident_handoffs(sentry_issue_id, created_at DESC);
+` as const
+
+export const latestSchemaVersion = 3
 
 const appliedVersion = (db: Database, version: number): boolean =>
   selectOne(db, "SELECT version FROM schema_migrations WHERE version = :version", {
@@ -129,6 +154,10 @@ export const migrate = (db: Database): void => {
     if (!appliedVersion(db, 2)) {
       db.run(migrationTwo)
       db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (2, datetime('now'))")
+    }
+    if (!appliedVersion(db, 3)) {
+      db.run(migrationThree)
+      db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (3, datetime('now'))")
     }
     db.run("COMMIT")
   } catch (error) {

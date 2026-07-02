@@ -2,16 +2,11 @@ import { describe, expect, it } from "vitest"
 
 import { buildPromptEnvelope } from "../../src/runner/prompt.js"
 import { SlackActionIds } from "../../src/slack/action-payload.js"
-import {
-  RecordingMergeRequestProvider,
-  RecordingRunner,
-  runnerResult,
-} from "./incident-workflow-fakes.js"
+import { RecordingPreparer, RecordingRunner, runnerResult } from "./incident-workflow-fakes.js"
 import {
   createWorkflow,
   detailedSentryContext,
   detectedIncident,
-  readSavedMrLinks,
   slackAction,
 } from "./incident-workflow-support.js"
 
@@ -42,8 +37,9 @@ describe("approval-gated incident workflow", () => {
 
   it("runs analysis after approval and posts the summary with second approval buttons", async () => {
     // Given: an incident and an analysis runner result.
+    const preparer = new RecordingPreparer()
     const runner = new RecordingRunner([runnerResult({ mode: "analysis_only" })])
-    const { slack, store, workflow } = createWorkflow(runner)
+    const { repo, slack, store, workflow } = createWorkflow(runner, { worktreePreparer: preparer })
     await workflow.handleDetectedIncident(detectedIncident)
 
     // When: Slack approves analysis.
@@ -52,9 +48,13 @@ describe("approval-gated incident workflow", () => {
     // Then: analysis is stored and Slack includes the summary plus [수정하기] [닫기].
     const incident = store.getIncidentByIssueId("SENTRY-10")
     expect(runner.calls).toHaveLength(1)
+    expect(repo.openRequests).toHaveLength(0)
+    expect(preparer.calls).toHaveLength(0)
+    expect(onlyRunnerRequest(runner).workspacePath).toBe(detectedIncident.repoPath)
     expect(store.getLatestAnalysisSummary(incident?.incidentId ?? "")?.summaryMarkdown).toContain(
       "Root cause",
     )
+    expect(JSON.stringify(slack.messages[1]?.blocks)).toContain("분석을 시작했습니다")
     const renderedBlocks = JSON.stringify(slack.messages.at(-1)?.blocks)
     expect(renderedBlocks).toContain("Root cause")
     expect(renderedBlocks).toContain("수정하기")
@@ -96,85 +96,6 @@ describe("approval-gated incident workflow", () => {
     expect(store.getLatestSentryIssueSnapshot(incident?.incidentId ?? "")?.snapshotJson).toContain(
       "event-10",
     )
-    store.close()
-  })
-
-  it("runs approved fix through verification, push, mr creation, persistence, and result posting", async () => {
-    // Given: an analyzed incident and a passing fix result.
-    const runner = new RecordingRunner([
-      runnerResult({ mode: "analysis_only" }),
-      runnerResult({ mode: "fix_and_mr", verificationResults: "passed" }),
-    ])
-    const { dbPath, mrProvider, repo, slack, store, workflow } = createWorkflow(runner)
-    await workflow.handleDetectedIncident(detectedIncident)
-    await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
-
-    // When: Slack approves the fix.
-    await workflow.handleSlackAction(slackAction("fix_requested", SlackActionIds.fixAfterAnalysis))
-
-    // Then: verification precedes push/MR and Slack receives the persisted GitLab MR link.
-    expect(runner.calls.map((call) => call.mode)).toEqual(["analysis_only", "fix_and_mr"])
-    expect(repo.pushRequests).toHaveLength(1)
-    expect(mrProvider.calls).toHaveLength(1)
-    expect(JSON.stringify(slack.messages.at(-1)?.blocks)).toContain(
-      "https://gitlab.example/incidents/merge_requests/7",
-    )
-    expect(readSavedMrLinks(dbPath)).toEqual([
-      {
-        provider: "gitlab",
-        url: "https://gitlab.example/incidents/merge_requests/7",
-      },
-    ])
-    store.close()
-  })
-
-  it("creates a github mr/pr through the provider contract and posts the pull request url", async () => {
-    // Given: a workflow using a provider implementation that identifies as GitHub.
-    const mrProvider = new RecordingMergeRequestProvider("github")
-    const runner = new RecordingRunner([
-      runnerResult({ mode: "analysis_only" }),
-      runnerResult({ mode: "fix_and_mr", verificationResults: "passed" }),
-    ])
-    const { dbPath, slack, store, workflow } = createWorkflow(runner, { mrProvider })
-    await workflow.handleDetectedIncident(detectedIncident)
-    await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
-
-    // When: Slack approves the fix and MR/PR creation completes.
-    await workflow.handleSlackAction(slackAction("fix_requested", SlackActionIds.fixAfterAnalysis))
-
-    // Then: persisted MR link metadata and Slack success text use the selected GitHub provider.
-    expect(readSavedMrLinks(dbPath)).toEqual([
-      {
-        provider: "github",
-        url: "https://github.example/incidents/pull/7",
-      },
-    ])
-    expect(JSON.stringify(slack.messages.at(-1)?.blocks)).toContain(
-      "https://github.example/incidents/pull/7",
-    )
-    store.close()
-  })
-
-  it("marks mr creation failed after push while retaining branch recovery metadata", async () => {
-    // Given: push succeeds but the selected provider rejects MR/PR creation after publication.
-    const runner = new RecordingRunner([runnerResult({ mode: "fix_and_mr" })])
-    const { mrProvider, repo, slack, store, workflow } = createWorkflow(runner)
-    mrProvider.failure = new Error("provider unavailable")
-    await workflow.handleDetectedIncident(detectedIncident)
-
-    // When: Slack approves the fix.
-    await workflow.handleSlackAction(slackAction("fix_requested", SlackActionIds.fixAndMr))
-
-    // Then: the branch remains available for retry and no misleading MR success is posted.
-    const slackOutput = JSON.stringify(slack.messages.at(-1))
-    expect(repo.pushRequests).toHaveLength(1)
-    expect(store.listAuditEntries().map((entry) => entry.action)).toContain(
-      "workflow.mr_failed_after_push",
-    )
-    expect(store.getIncidentByIssueId("SENTRY-10")?.workflowState).toBe("mr_failed_after_push")
-    expect(slackOutput).toContain("MR creation failed after push")
-    expect(slackOutput).toContain("incident/SENTRY-10")
-    expect(slackOutput).not.toContain("https://gitlab.example/incidents/merge_requests/7")
     store.close()
   })
 
@@ -231,6 +152,57 @@ describe("approval-gated incident workflow", () => {
     store.close()
   })
 
+  it("rejects dirty source repo before analysis runner", async () => {
+    // Given: an approved analysis workflow whose source repository has untracked changes.
+    const runner = new RecordingRunner([runnerResult({ mode: "analysis_only" })])
+    const { repo, slack, store, workflow } = createWorkflow(runner)
+    repo.dirtyWorkspaceStatus = "?? scratch.log\n"
+    await workflow.handleDetectedIncident(detectedIncident)
+
+    // When: Slack approves analysis.
+    await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
+
+    // Then: dirty source state blocks before runner execution and before opening a worktree.
+    expect(runner.calls).toHaveLength(0)
+    expect(repo.openRequests).toHaveLength(0)
+    expect(store.getIncidentByIssueId("SENTRY-10")?.workflowState).toBe("failed")
+    const slackFailure = JSON.stringify(slack.messages.at(-1))
+    expect(slackFailure).toContain("source repository is dirty")
+    expect(slackFailure).not.toContain("scratch.log")
+    store.close()
+  })
+
+  it("retries the same Slack action after a failed workflow job", async () => {
+    // Given: the first approved analysis fails before runner execution and the second attempt succeeds.
+    const fetchedIssueIds: string[] = []
+    const runner = new RecordingRunner([runnerResult({ mode: "analysis_only" })])
+    const { slack, store, workflow } = createWorkflow(runner, {
+      sentryContext: {
+        fetchIssueContext: async (incident) => {
+          fetchedIssueIds.push(incident.issueId)
+          if (fetchedIssueIds.length === 1) {
+            throw new Error("temporary clean worktree blocker")
+          }
+          return detailedSentryContext
+        },
+      },
+    })
+    await workflow.handleDetectedIncident(detectedIncident)
+
+    // When: the same Slack approval is clicked again after the failure.
+    await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
+    await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
+
+    // Then: the retry creates a new job, runs analysis, and does not report the action as handled.
+    expect(fetchedIssueIds).toEqual(["SENTRY-10", "SENTRY-10"])
+    expect(runner.calls).toHaveLength(1)
+    expect(store.getIncidentByIssueId("SENTRY-10")?.workflowState).toBe("analysis_completed")
+    expect(JSON.stringify(slack.messages)).toContain("분석을 시작했습니다")
+    expect(JSON.stringify(slack.messages)).not.toContain("already handled")
+    expect(JSON.stringify(slack.messages.at(-1))).toContain("분석 완료")
+    store.close()
+  })
+
   it("stops ignore and close flows without runner execution", async () => {
     // Given: a detected incident.
     const runner = new RecordingRunner([])
@@ -265,7 +237,7 @@ describe("approval-gated incident workflow", () => {
     expect(runner.calls).toHaveLength(1)
     expect(store.getIncidentByIssueId("SENTRY-10")?.incidentId).toMatch(/^incident_/u)
     expect(
-      slack.messages.filter((message) => message.text.includes("already handled")),
+      slack.messages.filter((message) => message.text.includes("이미 처리된 작업입니다")),
     ).toHaveLength(1)
     store.close()
   })

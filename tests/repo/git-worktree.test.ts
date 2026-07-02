@@ -114,6 +114,81 @@ describe("local git worktree adapter", () => {
     rmSync(worktreeRoot, { recursive: true, force: true })
   })
 
+  it("reuses an existing incident branch when reopening a job worktree", async () => {
+    // Given: a clean repository where the deterministic incident branch already exists.
+    const repo = createRepo()
+    const worktreeRoot = mkdtempSync(path.join(tmpdir(), "incident-chatops-worktrees-"))
+    const adapter = await createAdapter(repo, worktreeRoot)
+    git(repo, ["branch", "incident/SENTRY-123"])
+
+    // When: the same incident branch is opened for a new job worktree.
+    const session = await adapter.openWorktree({
+      branchName: "incident/SENTRY-123",
+      jobId: "job-retry",
+      repoPath: repo,
+    })
+
+    // Then: the existing branch is checked out instead of failing branch creation.
+    expect(existsSync(session.worktreePath)).toBe(true)
+    await session.close()
+
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(worktreeRoot, { recursive: true, force: true })
+  })
+
+  it("reuses the same clean worktree when the same job retries", async () => {
+    // Given: a job already has an open clean worktree for the incident branch.
+    const repo = createRepo()
+    const worktreeRoot = mkdtempSync(path.join(tmpdir(), "incident-chatops-worktrees-"))
+    const adapter = await createAdapter(repo, worktreeRoot)
+    const firstSession = await adapter.openWorktree({
+      branchName: "incident/SENTRY-123",
+      jobId: "job-retry",
+      repoPath: repo,
+    })
+
+    // When: the same job opens the same branch again.
+    const secondSession = await adapter.openWorktree({
+      branchName: "incident/SENTRY-123",
+      jobId: "job-retry",
+      repoPath: repo,
+    })
+
+    // Then: the existing worktree is reused instead of creating or deleting anything.
+    expect(secondSession.worktreePath).toBe(firstSession.worktreePath)
+    await secondSession.close()
+
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(worktreeRoot, { recursive: true, force: true })
+  })
+
+  it("rejects an incident branch already checked out by another job worktree", async () => {
+    // Given: a different job already owns the incident branch worktree.
+    const repo = createRepo()
+    const worktreeRoot = mkdtempSync(path.join(tmpdir(), "incident-chatops-worktrees-"))
+    const adapter = await createAdapter(repo, worktreeRoot)
+    const activeSession = await adapter.openWorktree({
+      branchName: "incident/SENTRY-123",
+      jobId: "job-active",
+      repoPath: repo,
+    })
+
+    // When: another job tries to open the same incident branch.
+    const openConflictingWorktree = (): Promise<unknown> =>
+      adapter.openWorktree({
+        branchName: "incident/SENTRY-123",
+        jobId: "job-other",
+        repoPath: repo,
+      })
+
+    // Then: the branch is reported as already checked out instead of being overwritten.
+    await expect(openConflictingWorktree).rejects.toThrow(/already checked out/)
+    await activeSession.close()
+
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(worktreeRoot, { recursive: true, force: true })
+  })
+
   it("rejects repos outside the allowlist before running git", async () => {
     // Given: an adapter allowlisted for one repository and a different denied repository.
     const allowedRepo = createRepo()
@@ -156,6 +231,23 @@ describe("local git worktree adapter", () => {
 
     // Then: the branch is denied before any worktree is created.
     await expect(openUnsafeBranch).rejects.toThrow(/branch prefix/)
+
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(worktreeRoot, { recursive: true, force: true })
+  })
+
+  it("reports dirty source status including untracked files", async () => {
+    // Given: an allowlisted repository with an untracked source file.
+    const repo = createRepo()
+    const worktreeRoot = mkdtempSync(path.join(tmpdir(), "incident-chatops-worktrees-"))
+    const adapter = await createAdapter(repo, worktreeRoot)
+    await writeFile(path.join(repo, "scratch.log"), "debug output\n")
+
+    // When: the source repository status is requested.
+    const dirtyStatus = await adapter.dirtyStatus({ repoPath: repo })
+
+    // Then: porcelain status reports the untracked file.
+    expect(dirtyStatus).toContain("?? scratch.log")
 
     rmSync(repo, { recursive: true, force: true })
     rmSync(worktreeRoot, { recursive: true, force: true })

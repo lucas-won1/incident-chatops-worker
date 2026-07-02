@@ -1,21 +1,19 @@
-import { spawn } from "node:child_process"
 import { mkdir, realpath } from "node:fs/promises"
 import path from "node:path"
 
-export type GitCommandInvocation = {
-  readonly args: readonly string[]
-  readonly command: "git"
-  readonly cwd: string
-}
+import { type GitCommandRunner, SpawnGitCommandRunner } from "./git-command-runner.js"
+import { parseGitWorktreeList } from "./git-worktree-list.js"
 
-export type GitCommandResult = {
-  readonly stderr: string
-  readonly stdout: string
-}
-
-export interface GitCommandRunner {
-  run(invocation: GitCommandInvocation): Promise<GitCommandResult>
-}
+export type {
+  GitCommandInvocation,
+  GitCommandResult,
+  GitCommandRunner,
+} from "./git-command-runner.js"
+export {
+  GitCommandError,
+  GitCommandTimeoutError,
+  SpawnGitCommandRunner,
+} from "./git-command-runner.js"
 
 export type LocalGitRepoAdapterOptions = {
   readonly allowlist: readonly string[]
@@ -36,6 +34,14 @@ export type PushGitBranchRequest = {
   readonly repoPath: string
 }
 
+export type GitDirtyStatusRequest = {
+  readonly repoPath: string
+}
+
+export type GitCurrentHeadRequest = {
+  readonly repoPath: string
+}
+
 export class GitWorktreePolicyError extends Error {
   public constructor(message: string) {
     super(message)
@@ -47,87 +53,6 @@ export class GitWorktreeDirtyError extends Error {
   public constructor(message: string) {
     super(message)
     this.name = "GitWorktreeDirtyError"
-  }
-}
-
-export class GitCommandError extends Error {
-  public readonly invocation: GitCommandInvocation
-  public readonly stderr: string
-
-  public constructor(invocation: GitCommandInvocation, stderr: string) {
-    super(`git ${invocation.args.join(" ")} failed: ${stderr}`)
-    this.name = "GitCommandError"
-    this.invocation = invocation
-    this.stderr = stderr
-  }
-}
-
-export class GitCommandTimeoutError extends Error {
-  public constructor(
-    public readonly invocation: GitCommandInvocation,
-    public readonly timeoutMs: number,
-  ) {
-    super(`git ${invocation.args.join(" ")} timed out after ${timeoutMs}ms`)
-    this.name = "GitCommandTimeoutError"
-  }
-}
-
-const defaultGitCommandTimeoutMs = 60_000
-
-export class SpawnGitCommandRunner implements GitCommandRunner {
-  readonly #timeoutMs: number
-
-  public constructor(options: { readonly timeoutMs?: number } = {}) {
-    this.#timeoutMs = options.timeoutMs ?? defaultGitCommandTimeoutMs
-  }
-
-  public async run(invocation: GitCommandInvocation): Promise<GitCommandResult> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(invocation.command, invocation.args, {
-        cwd: invocation.cwd,
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-      })
-      const stdoutChunks: Buffer[] = []
-      const stderrChunks: Buffer[] = []
-      let timedOut = false
-      let settled = false
-      const timeout = setTimeout(() => {
-        timedOut = true
-        child.kill("SIGKILL")
-      }, this.#timeoutMs)
-
-      const rejectOnce = (error: Error): void => {
-        if (settled) {
-          return
-        }
-        settled = true
-        clearTimeout(timeout)
-        reject(error)
-      }
-
-      child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk))
-      child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk))
-      child.on("error", rejectOnce)
-      child.on("close", (code) => {
-        if (settled) {
-          return
-        }
-        settled = true
-        clearTimeout(timeout)
-        const stdout = Buffer.concat(stdoutChunks).toString("utf8")
-        const stderr = Buffer.concat(stderrChunks).toString("utf8")
-        if (timedOut) {
-          reject(new GitCommandTimeoutError(invocation, this.#timeoutMs))
-          return
-        }
-        if (code === 0) {
-          resolve({ stderr, stdout })
-          return
-        }
-        reject(new GitCommandError(invocation, stderr.trim()))
-      })
-    })
   }
 }
 
@@ -218,12 +143,25 @@ export class LocalGitRepoAdapter {
     await this.#ensureClean(repoPath, "repository")
     const worktreeRoot = await this.#prepareWorktreeRoot()
     const worktreePath = path.join(worktreeRoot, request.jobId)
+    const existingWorktreePath = await this.#findWorktreePathForBranch(repoPath, request.branchName)
 
-    await this.#runner.run({
-      args: ["worktree", "add", "-b", request.branchName, worktreePath, "HEAD"],
-      command: "git",
-      cwd: repoPath,
-    })
+    if (existingWorktreePath === worktreePath) {
+      await this.#ensureClean(worktreePath, "worktree")
+    } else {
+      if (existingWorktreePath !== undefined) {
+        throw new GitWorktreePolicyError(
+          `branch ${request.branchName} is already checked out at ${existingWorktreePath}`,
+        )
+      }
+      const addArgs = (await this.#branchExists(repoPath, request.branchName))
+        ? ["worktree", "add", worktreePath, request.branchName]
+        : ["worktree", "add", "-b", request.branchName, worktreePath, "HEAD"]
+      await this.#runner.run({
+        args: addArgs,
+        command: "git",
+        cwd: repoPath,
+      })
+    }
 
     return new GitWorktreeSession({
       branchName: request.branchName,
@@ -241,6 +179,21 @@ export class LocalGitRepoAdapter {
       command: "git",
       cwd: repoPath,
     })
+  }
+
+  public async dirtyStatus(request: GitDirtyStatusRequest): Promise<string> {
+    const repoPath = await this.#resolveAllowedRepo(request.repoPath)
+    return this.#dirtyStatus(repoPath)
+  }
+
+  public async currentHead(request: GitCurrentHeadRequest): Promise<string> {
+    const repoPath = await this.#resolveAllowedRepoOrWorktree(request.repoPath)
+    const result = await this.#runner.run({
+      args: ["rev-parse", "HEAD"],
+      command: "git",
+      cwd: repoPath,
+    })
+    return result.stdout.trim()
   }
 
   async #resolveAllowedRepo(repoPath: string): Promise<string> {
@@ -268,19 +221,64 @@ export class LocalGitRepoAdapter {
     return normalizedRepoPath
   }
 
+  async #resolveAllowedRepoOrWorktree(repoPath: string): Promise<string> {
+    const normalizedRepoPath = await normalizeExistingPath(repoPath)
+    if (this.#allowlist.includes(normalizedRepoPath)) {
+      return normalizedRepoPath
+    }
+
+    const normalizedWorktreeRoot = await normalizeExistingPath(this.#worktreeRoot)
+    if (
+      normalizedRepoPath === normalizedWorktreeRoot ||
+      normalizedRepoPath.startsWith(`${normalizedWorktreeRoot}${path.sep}`)
+    ) {
+      return normalizedRepoPath
+    }
+
+    throw new GitWorktreePolicyError(
+      `repo denied by allowlist: ${normalizedRepoPath} not in ${formatAllowlist(this.#allowlist)}`,
+    )
+  }
+
   async #prepareWorktreeRoot(): Promise<string> {
     await mkdir(this.#worktreeRoot, { recursive: true })
     return normalizeExistingPath(this.#worktreeRoot)
   }
 
-  async #ensureClean(cwd: string, label: string): Promise<void> {
+  async #branchExists(repoPath: string, branchName: string): Promise<boolean> {
     const result = await this.#runner.run({
-      args: ["status", "--porcelain=v1"],
+      args: ["branch", "--list", "--format=%(refname:short)", branchName],
+      command: "git",
+      cwd: repoPath,
+    })
+    return result.stdout.split("\n").some((line) => line.trim() === branchName)
+  }
+
+  async #findWorktreePathForBranch(
+    repoPath: string,
+    branchName: string,
+  ): Promise<string | undefined> {
+    const result = await this.#runner.run({
+      args: ["worktree", "list", "--porcelain"],
+      command: "git",
+      cwd: repoPath,
+    })
+    const match = parseGitWorktreeList(result.stdout).find((entry) => entry.branch === branchName)
+    return match?.path
+  }
+
+  async #ensureClean(cwd: string, label: string): Promise<void> {
+    if ((await this.#dirtyStatus(cwd)).trim().length > 0) {
+      throw new GitWorktreeDirtyError(`${label} must be clean before opening a worktree`)
+    }
+  }
+
+  async #dirtyStatus(cwd: string): Promise<string> {
+    const result = await this.#runner.run({
+      args: ["status", "--porcelain=v1", "--untracked-files=all"],
       command: "git",
       cwd,
     })
-    if (result.stdout.trim().length > 0) {
-      throw new GitWorktreeDirtyError(`${label} must be clean before opening a worktree`)
-    }
+    return result.stdout
   }
 }

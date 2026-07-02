@@ -112,6 +112,8 @@ describe("public docs and examples", () => {
     expect(result.stdout).toContain("PASS Korean docs requirements docs/security.md")
     expect(result.stdout).toContain("PASS no raw secret patterns")
     expect(result.stdout).toContain("PASS docs unsupported surfaces are non-goals only")
+    expect(result.stdout).toContain("PASS YAML example uses runner provider blocks")
+    expect(result.stdout).toContain("PASS docs explain runner provider instances")
   })
 
   it("fails scope verification when forbidden MVP surfaces are present", async () => {

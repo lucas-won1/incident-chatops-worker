@@ -47,8 +47,8 @@ const runCodex = async (runner: CodexExecRunner, mode: RunnerModeName) =>
     allowedCommands: ["pnpm test"],
     incidentContext,
     mode,
-    repositoryConstraints: "Use only the approved worktree.",
-    worktreePath: "/tmp/incident-worktree",
+    repositoryConstraints: "Use only the approved workspace.",
+    workspacePath: "/tmp/incident-workspace",
   })
 
 const outputLastMessagePath = (invocation: RunnerProcessInvocation | undefined): string => {
@@ -94,6 +94,7 @@ describe("Codex stale output-last-message protection", () => {
         analysis: "stale fix analysis",
         branchInfo: "incident/SENTRY-123",
         changesSummary: "stale changes",
+        mergeRequestBody: "## 요약\n\n- stale changes",
         mrReadiness: "ready",
         verificationResults: "passed: stale",
       }),

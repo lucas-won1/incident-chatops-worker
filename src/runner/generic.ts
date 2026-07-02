@@ -1,11 +1,13 @@
+import { dirtyStatusFor } from "./clean-checker.js"
 import { RunnerDirtyWorktreeError, RunnerPolicyError, RunnerProcessError } from "./errors.js"
 import { SafeProcessRunner } from "./process.js"
+import { applyProjectEnvironment, type ProjectEnvironmentConfig } from "./project-env.js"
 import {
   defaultEnvAllowlist,
   defaultOutputLimitBytes,
   defaultRunnerTimeoutMs,
-  ensureAnalysisCommandSafe,
   ensureCommandAllowed,
+  ensureGenericCommandSafe,
   redactRunnerOutput,
   rejectShellInterpreterCommand,
   selectAllowedEnv,
@@ -20,6 +22,7 @@ import type {
   RunnerProcess,
   RunnerResult,
 } from "./types.js"
+import { runnerWorkspacePath } from "./types.js"
 
 export type GenericCommandRunnerOptions = {
   readonly cleanChecker: RunnerCleanChecker
@@ -29,6 +32,7 @@ export type GenericCommandRunnerOptions = {
   readonly genericCommandAllowlist: readonly string[]
   readonly outputLimitBytes?: number
   readonly processRunner?: RunnerProcess
+  readonly projectEnv?: ProjectEnvironmentConfig | undefined
   readonly secretEnvNames?: readonly string[]
   readonly secretValues?: readonly string[]
   readonly timeoutMs?: number
@@ -44,35 +48,41 @@ export class GenericCommandRunner implements RunnerAdapter<GenericRunnerRequest>
   }
 
   public async run(request: GenericRunnerRequest): Promise<RunnerResult> {
+    const workspacePath = runnerWorkspacePath(request)
     const definition = this.#findDefinition(request.commandId)
     ensureCommandAllowed(definition.command, this.#options.genericCommandAllowlist)
     validateExecutable(definition.command, "generic runner")
     validateArgs(definition.args, "generic runner")
     rejectShellInterpreterCommand(definition.command, definition.args, "generic runner")
-    if (request.mode === "analysis_only") {
-      ensureAnalysisCommandSafe([definition.id, definition.command, ...definition.args])
-    }
+    ensureGenericCommandSafe([definition.id, definition.command, ...definition.args])
     const envSource = this.#options.env ?? process.env
     const secretValues = this.#secretValues(envSource)
+    const commandInvocation = applyProjectEnvironment(
+      {
+        args: definition.args,
+        command: definition.command,
+      },
+      this.#options.projectEnv,
+    )
 
     const processResult = await this.#processRunner.run({
-      args: definition.args,
-      command: definition.command,
-      cwd: request.worktreePath,
+      args: commandInvocation.args,
+      command: commandInvocation.command,
+      cwd: workspacePath,
       env: selectAllowedEnv(envSource, this.#options.envAllowlist ?? defaultEnvAllowlist),
       outputLimitBytes: this.#options.outputLimitBytes ?? defaultOutputLimitBytes,
       secretRedactionValues: secretValues,
       timeoutMs: this.#options.timeoutMs ?? defaultRunnerTimeoutMs,
     })
     const dirtyAnalysisWorktree =
-      request.mode === "analysis_only" &&
-      !(await this.#options.cleanChecker.isClean(request.worktreePath))
+      request.mode === "analysis_only" && !(await this.#options.cleanChecker.isClean(workspacePath))
     if (dirtyAnalysisWorktree) {
       throw new RunnerDirtyWorktreeError(
-        request.worktreePath,
+        workspacePath,
         processResult.exitCode === 0
           ? undefined
           : { command: definition.command, exitCode: processResult.exitCode },
+        await dirtyStatusFor(this.#options.cleanChecker, workspacePath),
       )
     }
     if (processResult.exitCode !== 0) {

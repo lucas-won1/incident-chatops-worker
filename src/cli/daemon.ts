@@ -61,8 +61,11 @@ const createDefaultStarter = (runtime: CliRuntimeOptions): DaemonStarter => {
     writeStatus: (line) => emitRuntimeLine(runtime, line),
   }
   const getWorkflowRuntime = (settings: WorkerSettings): Promise<DaemonWorkflowRuntime> => {
+    const workflowFactory = dependencies.daemonWorkflowFactory
     workflowRuntime ??= Promise.resolve(
-      (dependencies.daemonWorkflowFactory ?? createProductionDaemonWorkflowRuntime)(settings),
+      workflowFactory === undefined
+        ? createProductionDaemonWorkflowRuntime(settings, dependencies)
+        : workflowFactory(settings),
     )
     return workflowRuntime
   }

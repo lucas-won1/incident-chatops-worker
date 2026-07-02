@@ -14,29 +14,36 @@
 
 - 비밀값은 env-only입니다. `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, `SENTRY_AUTH_TOKEN`, `GITLAB_TOKEN`, `GITHUB_TOKEN` 같은 값은 `.env` 또는 프로세스 환경에만 둡니다.
 - YAML secret은 거부됩니다. YAML 설정에 `token`, `secret`, `password`, `credential`, `api_key`, `auth` 같은 secret-looking key가 있거나 token-looking value가 있으면 설정 로딩이 실패합니다.
-- YAML은 비밀이 아닌 정책만 담습니다. 예: Sentry project mapping, Slack channel routing, repo allowlist, worktree root, branch prefix, command allowlist, GitLab/GitHub project or repository metadata, base URL, default labels, draft flag, target branch.
+- YAML은 비밀이 아닌 정책만 담습니다. 예: Sentry project mapping, Slack channel routing, repo allowlist, worktree root, `worktree.prepare`, branch prefix, `runners.provider`, `runners.projectEnv`, `runners.codex`, `runners.claudeCode`, `runners.generic`, GitLab/GitHub project or repository metadata, base URL, default labels, draft flag, target branch.
 - 공개 문서, evidence, issue, Slack 메시지에 실제 토큰, auth header, cookie, private log, PII를 붙여 넣지 않습니다.
 
 ## 승인과 실행 경계
 
 - Slack approval 없이는 runner가 실행되지 않습니다. 감지 단계는 Slack 메시지를 만들고 상태를 저장하는 단계이며, repository mutation을 하지 않습니다.
-- `analysis_only`는 분석 전용입니다. commit, push, MR/PR 생성 같은 mutation 의도는 차단됩니다.
-- `fix_and_mr`도 무제한 실행이 아닙니다. 허용된 저장소 worktree에서 실행되고, 검증 결과가 통과해야 push와 Git provider MR/PR 생성으로 넘어갑니다.
+- `analysis_only`는 분석 전용입니다. configured source repo path에서 실행되고 source repo clean 상태가 필요합니다. worker git worktree를 만들지 않고, `worktree.prepare`, commit, branch 생성, push, MR/PR 생성 같은 mutation 의도는 차단됩니다. runner가 source workspace를 dirty 상태로 만들면 실패합니다.
+- `fix_and_mr`도 무제한 실행이 아닙니다. 허용된 저장소의 worker git worktree에서 실행되고, `worktree.prepare`, runner, verification이 통과해야 push와 Git provider MR/PR 생성으로 넘어갑니다.
 - repo allowlist는 절대 경로 기준입니다. allowlist 밖의 repository나 realpath가 다른 경로는 거부되어야 합니다.
 - branch prefix는 설정된 prefix를 따라야 합니다. traversal, 중복 separator, 위험한 branch 모양은 허용하지 않습니다.
-- command allowlist는 generic runner의 실행 파일 이름을 제한합니다. allowlist에 없는 command는 실행하지 않습니다.
+- `runners.provider`가 사용할 runner를 고릅니다. command allowlist는 generic runner의 실행 파일 이름을 제한합니다. allowlist에 없는 command는 실행하지 않습니다.
+- `worktree.prepare` command와 `runners.projectEnv` wrapper는 shell 없이 argv 배열로 실행됩니다. shell interpreter, command string, env split-string 형태는 허용하지 않습니다.
+- Codex provider는 `codex exec`만 실행합니다. Codex App follow-up은 별도 handoff 흐름에서 다루며, worker runner 설정으로 선택하지 않습니다.
+- `runners.codex.workspaceWriteNetworkAccess`는 Codex `workspace-write` sandbox command의 network/listen access를 여는 설정입니다. dev server smoke나 package fetch가 필요한 trusted repo에서만 켭니다.
 
 ## Runner와 redaction
 
-- runner child env는 최소화됩니다. 기본 child process에는 `PATH`, `HOME`, `CODEX_HOME`처럼 허용된 환경만 전달하고, 서비스 토큰 환경 변수는 전달하지 않습니다.
+- runner child env는 최소화됩니다. 기본 child process에는 `PATH`, `HOME`만 전달하고, Codex는 `runners.codex.home`으로 설정된 `CODEX_HOME`만 전달합니다. 서비스 토큰 환경 변수와 터미널에 미리 로드된 Codex 세션 환경 변수는 전달하지 않습니다.
+- Codex `home`은 `CODEX_HOME` config/auth/session root입니다. `bin`, `profile`, `model`은 invocation override이며 `CODEX_HOME/profile/model/bin` 같은 경로가 아닙니다.
+- Claude Code `configDir`는 process config 파일 위치를 분리하지만, macOS Keychain에 저장되는 login credential까지 항상 별도 저장소로 분리한다고 보장하지는 않습니다.
 - 토큰 redaction은 별도로 유지됩니다. child env에 토큰을 넘기지 않더라도, runner output, stdout, stderr, parsed result에서 env-only secret value가 보이면 `[REDACTED]`로 마스킹합니다.
 - redaction은 Slack/Sentry/GitLab/GitHub 계열 token-looking pattern과 설정에서 전달된 정확한 secret value를 대상으로 합니다.
 - Sentry polling snapshot과 fetched Sentry context는 runner request, prompt, SQLite 저장 전에 redaction을 거칩니다. object key 위치에 들어간 secret value도 마스킹 대상입니다.
 - audit log details는 저장 전에 redaction과 길이 제한을 거칩니다.
+- incident handoff는 MR/PR 생성 후 cleanup 전에 SQLite에 저장됩니다. 저장 대상은 issue id, repo id/path, MR/PR URL, `sourceBranch`, target branch, `headSha`, 요약, readiness, follow-up prompt처럼 후속 작업에 필요한 최소 context입니다. raw Sentry payload는 handoff에 저장하지 않고, summary와 prompt는 redaction 후 저장합니다.
 
 ## 감사 로그와 상태 노출
 
 - 상태와 audit log는 로컬 SQLite DB에 저장됩니다. 감사 이벤트는 `audit_log` 테이블에 append 형태로 남고, `logs` 명령은 이 로컬 감사 로그를 읽습니다.
+- `node dist/cli.js mcp --db <state.sqlite>`는 SQLite handoff를 읽는 token-light/read-only surface입니다. Slack/Sentry/Git provider token이 필요하지 않고 daemon, polling, runner, push, MR/PR 생성을 시작하지 않습니다.
 - `status`, `logs`, daemon degraded polling 메시지, Slack status message는 secret value가 노출되지 않도록 redaction된 내용을 사용해야 합니다.
 - SQLite 파일은 운영자가 관리하는 로컬 파일입니다. 백업, 권한, 보관 기간은 운영 환경 기준으로 정하고, 공개 저장소나 공유 채널에 업로드하지 않습니다.
 
@@ -62,6 +69,8 @@
 - 공개 webhook server 또는 Sentry webhook setup. webhook 기본값은 없습니다.
 - Bitbucket, Gitea/Forgejo/Codeberg, Azure DevOps Repos, AWS CodeCommit, Gerrit provider.
 - GUI dashboard 또는 hosted control plane.
+- GUI Codex 또는 Claude 앱 제어, discovery, attach, launch.
+- Codex App 후속 작업을 worker runner config로 선택하는 방식. App follow-up은 repo-local `incident-handoff` plugin, MCP, `$incident <issue-id>` invocation으로만 이어갑니다.
 - live Slack/Sentry/Git provider credential QA.
 - Sentry 감지 즉시 자동 수정, 자동 commit, 자동 push, 자동 MR 생성.
 - allowlist를 우회하는 command runner, shell wrapper, 위험한 Codex override flag.

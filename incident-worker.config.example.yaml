@@ -8,6 +8,14 @@ repos:
     - /Users/example/work/service-repo
 worktree:
   root: /Users/example/.local/share/incident-chatops-worker/worktrees
+  prepare:
+    timeoutMs: 900000
+    commands:
+      - command: pnpm
+        args:
+          - install
+          - --frozen-lockfile
+          - --prefer-offline
 branch:
   prefix: incident/
 slack:
@@ -16,14 +24,47 @@ slack:
     routing:
       frontend: "#frontend-incidents"
 runners:
-  genericCommandAllowlist:
-    - echo
-  definitions:
-    - id: echo-safe
-      type: generic
-      command: echo
-      args:
-        - incident-analysis-placeholder
+  provider: codex
+  projectEnv:
+    command: /Users/example/.local/bin/mise
+    args:
+      - exec
+      - --
+  codex:
+    home: /Users/example/.local/share/incident-chatops-worker/codex
+    bin: codex
+    profile: incident-worker
+    model: gpt-5-codex
+    outputRoot: /Users/example/.local/share/incident-chatops-worker/codex-output
+    workspaceWriteNetworkAccess: false
+    extraEnvAllowlist: []
+  claudeCode:
+    bin: claude
+    configDir: /Users/example/.local/share/incident-chatops-worker/claude
+    settingsPath: /Users/example/.local/share/incident-chatops-worker/claude/settings.json
+    model: claude-sonnet-4
+    permissionMode: acceptEdits
+    allowedTools:
+      - Read
+    disallowedTools:
+      - Bash(git push:*)
+    extraEnvAllowlist: []
+  generic:
+    analysisCommandId: echo-analysis
+    fixCommandId: echo-fix
+    commandAllowlist:
+      - echo
+    definitions:
+      - id: echo-analysis
+        type: generic
+        command: echo
+        args:
+          - incident-analysis-placeholder
+      - id: echo-fix
+        type: generic
+        command: echo
+        args:
+          - incident-fix-placeholder
 mr:
   provider: gitlab
   gitlab:

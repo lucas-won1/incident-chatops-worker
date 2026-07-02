@@ -1,0 +1,20 @@
+{
+  "name": "incident-chatops-worker",
+  "interface": {
+    "displayName": "Incident ChatOps Worker"
+  },
+  "plugins": [
+    {
+      "name": "incident-handoff",
+      "source": {
+        "source": "local",
+        "path": "./plugins/incident-handoff"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

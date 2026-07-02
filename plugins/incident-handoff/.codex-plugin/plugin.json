@@ -1,0 +1,22 @@
+{
+  "name": "incident-handoff",
+  "version": "0.1.0",
+  "description": "Repo-local Codex plugin for concise incident handoff lookup and follow-up guidance.",
+  "author": {
+    "name": "Incident ChatOps Worker Team"
+  },
+  "license": "MIT",
+  "keywords": ["incident", "handoff", "mcp", "sentry", "merge-request"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Incident Handoff",
+    "shortDescription": "Look up incident handoffs and continue App follow-up.",
+    "longDescription": "Incident Handoff gives Codex a repo-local read-only handoff lookup and strict follow-up workflow for Sentry-backed incident fixes.",
+    "developerName": "Incident ChatOps Worker Team",
+    "category": "Developer Tools",
+    "capabilities": ["MCP", "Read"],
+    "brandColor": "#2563EB",
+    "defaultPrompt": ["Use $incident SENTRY-123 to inspect the latest handoff."]
+  }
+}

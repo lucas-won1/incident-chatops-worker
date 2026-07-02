@@ -1,3 +1,5 @@
+export type { ClaudeCodeRunnerOptions } from "./claude-code.js"
+export { ClaudeCodeRunner } from "./claude-code.js"
 export { GitRunnerCleanChecker } from "./clean-checker.js"
 export { CodexExecRunner } from "./codex.js"
 export {
@@ -6,7 +8,14 @@ export {
   RunnerPolicyError,
   RunnerProcessError,
   RunnerTimeoutError,
+  RunnerWorkspacePathError,
 } from "./errors.js"
+export {
+  createProductionRunner,
+  ModeAwareGenericRunner,
+  UnsupportedRunnerModeError,
+  UnsupportedRunnerProviderError,
+} from "./factory.js"
 export { GenericCommandRunner } from "./generic.js"
 export { SafeProcessRunner } from "./process.js"
 export { buildPromptEnvelope } from "./prompt.js"

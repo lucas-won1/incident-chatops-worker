@@ -13,6 +13,7 @@ import type {
   AnalysisSummaryRecord,
   AuditEntryInput,
   CompleteJobInput,
+  IncidentHandoffInput,
   IncidentInput,
   IncidentRecord,
   IncidentUpsertResult,
@@ -57,6 +58,7 @@ export type WorkflowStateStore = {
     incidentId: string,
   ) => VerificationSummaryRecord | undefined
   readonly saveMrLink: (input: MrLinkInput) => void
+  readonly saveIncidentHandoff: (input: IncidentHandoffInput) => unknown
   readonly appendAuditEntry: (input: AuditEntryInput) => unknown
 }
 
@@ -72,6 +74,8 @@ export type WorkflowSlackPublisher = {
   readonly postMessage: (message: SlackRenderedMessage) => Promise<WorkflowSlackPostResult>
 }
 
+export type WorkflowStatusReporter = (line: string) => void
+
 export type WorkflowWorktreeSession = {
   readonly branchName: string
   readonly repoPath: string
@@ -80,12 +84,22 @@ export type WorkflowWorktreeSession = {
 }
 
 export type WorkflowRepoAdapter = {
+  readonly currentHead: (request: { readonly repoPath: string }) => Promise<string>
+  readonly dirtyStatus: (request: { readonly repoPath: string }) => Promise<string>
   readonly openWorktree: (request: {
     readonly branchName: string
     readonly jobId: string
     readonly repoPath: string
   }) => Promise<WorkflowWorktreeSession>
   readonly pushBranch: (request: PushGitBranchRequest) => Promise<void>
+}
+
+export type WorkflowWorktreePrepareRequest = {
+  readonly session: WorkflowWorktreeSession
+}
+
+export type WorkflowWorktreePreparer = {
+  readonly prepare: (request: WorkflowWorktreePrepareRequest) => Promise<void>
 }
 
 export type IncidentWorkflowOptions = {
@@ -105,6 +119,8 @@ export type IncidentWorkflowOptions = {
   readonly sentryContextSecretValues?: readonly string[]
   readonly slack: WorkflowSlackPublisher
   readonly state: WorkflowStateStore
+  readonly statusReporter?: WorkflowStatusReporter
+  readonly worktreePreparer?: WorkflowWorktreePreparer
 }
 
 export type WorkflowActionResult =

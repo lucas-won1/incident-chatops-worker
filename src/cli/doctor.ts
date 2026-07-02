@@ -5,6 +5,7 @@ import type { WorkerSettings } from "../config/index.js"
 import { ConfigValidationError } from "../config/index.js"
 import { type CliResult, ok } from "../shared/cli-result.js"
 import { redactSensitiveText } from "../shared/redaction.js"
+import { runnerProviderStatusLines } from "./doctor-runner-status.js"
 import { doctorFailure, loadCommandSettings } from "./settings.js"
 
 export type ReachabilityStatus =
@@ -222,6 +223,7 @@ Sentry minimum polling interval: ${loaded.settings.env.sentryPollMinIntervalSeco
 Repo allowlist entries: ${loaded.settings.config.repos.allowlist.length}
 Branch prefix: ${loaded.settings.config.branchPrefix}
 Runner definitions: ${loaded.settings.config.runners.definitions.length}
+${runnerProviderStatusLines(loaded.settings)}
 Slack bot token: present (${slackBotStatus})
 Slack app token: present (${slackAppStatus})
 Sentry token: present (${sentryStatus})

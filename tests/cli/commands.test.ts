@@ -35,6 +35,62 @@ describe("production CLI commands", () => {
     expect(result.stdout).not.toContain("sntrys_redacted_example")
   })
 
+  it("doctor reports selected runner provider and safe provider-specific status", async () => {
+    // Given: fake mode settings select Claude Code with process-owned config isolation.
+    const { configPath, envPath } = writeFixtureFiles(createTempDir())
+    writeFileSync(
+      configPath,
+      `
+sentry:
+  projects:
+    - organizationSlug: demo-org
+      projectSlug: frontend
+      slackChannel: "#incidents"
+repos:
+  allowlist:
+    - /Users/won/Work/incident-chatops-worker
+worktree:
+  root: /Users/won/Work/incident-chatops-worker/.omo/worktrees
+branch:
+  prefix: incident/
+slack:
+  channels:
+    default: "#incidents"
+runners:
+  provider: claude-code
+  claudeCode:
+    configDir: /var/lib/incident-worker/claude
+    model: claude-sonnet-4
+    allowedTools:
+      - Read
+  generic:
+    commandAllowlist:
+      - echo
+    definitions:
+      - id: echo-safe
+        type: generic
+        command: echo
+mr:
+  provider: gitlab
+  gitlab:
+    baseUrl: https://gitlab.com/api/v4
+    project: demo-org/frontend
+  defaultTargetBranch: main
+`,
+    )
+
+    // When: doctor checks setup without live token probes.
+    const result = await runCliAsync(["doctor", "--config", configPath, "--env-file", envPath])
+
+    // Then: runner instance reporting is provider-specific and path/token safe.
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("Runner provider: claude-code")
+    expect(result.stdout).toContain("Runner Claude Code config dir: configured")
+    expect(result.stdout).toContain("Runner Claude Code tools: allowed=1 disallowed=0")
+    expect(result.stdout).not.toContain("/var/lib/incident-worker/claude")
+    expect(result.stdout).not.toContain("claude-sonnet-4")
+  })
+
   it("doctor labels the selected GitHub provider token in fake mode", async () => {
     // Given: fake mode settings select GitHub without GitLab routing.
     const { configPath, dbPath, envPath } = writeFixtureFiles(createTempDir())

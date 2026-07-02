@@ -5,12 +5,17 @@ import { insertApproval } from "./approval-repository.js"
 import { insertAuditEntry, listAuditEntries } from "./audit-repository.js"
 import { StateStoreReadOnlyError } from "./errors.js"
 import {
+  getIncidentHandoffByIssueId,
+  listIncidentHandoffs,
+  saveIncidentHandoff,
+} from "./handoff-repository.js"
+import {
   getIncidentByIssueId,
   updateIncidentThreadTs,
   updateIncidentWorkflowState,
   upsertIncident,
 } from "./incident-repository.js"
-import { claimJobForSlackAction, completeJob } from "./job-repository.js"
+import { abandonActiveJobs, claimJobForSlackAction, completeJob } from "./job-repository.js"
 import { migrate, getSchemaVersion as readSchemaVersion } from "./migrations.js"
 import { saveMrLink } from "./mr-repository.js"
 import {
@@ -22,6 +27,7 @@ import type {
   AnalysisSummaryInput,
   AuditEntryInput,
   CompleteJobInput,
+  IncidentHandoffInput,
   IncidentInput,
   JobClaimInput,
   MrLinkInput,
@@ -37,11 +43,14 @@ export {
   StateStoreReadOnlyError,
 } from "./errors.js"
 export type {
+  AbandonActiveJobsInput,
   AnalysisSummaryInput,
   AnalysisSummaryRecord,
   AuditEntryInput,
   AuditEntryRecord,
   CompleteJobInput,
+  IncidentHandoffInput,
+  IncidentHandoffRecord,
   IncidentInput,
   IncidentRecord,
   IncidentUpsertResult,
@@ -154,6 +163,19 @@ class SqliteStateStore {
     saveMrLink(this.#db, this.#path, input)
   }
 
+  public saveIncidentHandoff(input: IncidentHandoffInput) {
+    this.assertWritable("saveIncidentHandoff")
+    return saveIncidentHandoff(this.#db, this.#path, input)
+  }
+
+  public getIncidentHandoffByIssueId(issueId: string) {
+    return getIncidentHandoffByIssueId(this.#db, issueId)
+  }
+
+  public listIncidentHandoffs(limit: number) {
+    return listIncidentHandoffs(this.#db, limit)
+  }
+
   public saveApproval(input: Parameters<typeof insertApproval>[1]): void {
     this.assertWritable("saveApproval")
     transaction(this.#db, this.#path, () => {
@@ -171,6 +193,11 @@ class SqliteStateStore {
     completeJob(this.#db, this.#path, input)
   }
 
+  public abandonActiveJobs(input: Parameters<typeof abandonActiveJobs>[2]) {
+    this.assertWritable("abandonActiveJobs")
+    return abandonActiveJobs(this.#db, this.#path, input)
+  }
+
   public appendAuditEntry(input: AuditEntryInput) {
     this.assertWritable("appendAuditEntry")
     return transaction(this.#db, this.#path, () => insertAuditEntry(this.#db, input))
@@ -184,7 +211,7 @@ class SqliteStateStore {
 export const openSqliteStateStore = (options: OpenSqliteStateStoreOptions): SqliteStateStore => {
   const createIfMissing = options.createIfMissing ?? true
   const accessMode = options.accessMode ?? "write"
-  const db = openDatabase(options.path, createIfMissing)
+  const db = openDatabase(options.path, createIfMissing, accessMode)
   if (accessMode === "write") {
     migrate(db)
     persistDatabase(db, options.path)

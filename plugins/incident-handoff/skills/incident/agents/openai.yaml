@@ -1,0 +1,12 @@
+interface:
+  display_name: "Incident"
+  short_description: "Open incident handoffs from worker MCP"
+  brand_color: "#2563EB"
+  default_prompt: "Use $incident SENTRY-123 to inspect a concise incident handoff."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "incident_handoff"
+      description: "Read-only incident handoff lookup from this worker repository."
+policy:
+  allow_implicit_invocation: true

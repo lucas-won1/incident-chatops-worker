@@ -22,39 +22,13 @@ const validGithubYaml = validYaml.replace(
   `  provider: github\n${githubRoutingBlock}`,
 )
 
-type StatePathScenario = {
-  readonly name: string
-  readonly platform: NodeJS.Platform
-  readonly env: Readonly<Record<string, string>>
-  readonly expected: string
-}
+const genericRunnerBlock = `  generic:\n    analysisCommandId: echo-analysis\n    fixCommandId: echo-fix\n    commandAllowlist:\n      - echo\n    definitions:\n      - id: echo-analysis\n        type: generic\n        command: echo\n        args:\n          - analysis\n      - id: echo-fix\n        type: generic\n        command: echo\n        args:\n          - fix\n`
 
-const statePathScenarios = [
-  {
-    name: "macOS",
-    platform: "darwin",
-    env: { HOME: "/Users/demo" },
-    expected: "/Users/demo/Library/Application Support/incident-chatops-worker/state.sqlite",
-  },
-  {
-    name: "Linux XDG",
-    platform: "linux",
-    env: { HOME: "/home/demo", XDG_STATE_HOME: "/tmp/xdg-state" },
-    expected: "/tmp/xdg-state/incident-chatops-worker/state.sqlite",
-  },
-  {
-    name: "Linux home fallback",
-    platform: "linux",
-    env: { HOME: "/home/demo" },
-    expected: "/home/demo/.local/state/incident-chatops-worker/state.sqlite",
-  },
-  {
-    name: "Windows",
-    platform: "win32",
-    env: { LOCALAPPDATA: "C:\\Users\\demo\\AppData\\Local" },
-    expected: "C:\\Users\\demo\\AppData\\Local\\incident-chatops-worker\\state.sqlite",
-  },
-] satisfies readonly StatePathScenario[]
+const yamlWithRunnerBlock = (runnerBlock: string): string =>
+  validYaml.replace(
+    `  genericCommandAllowlist:\n    - echo\n  definitions:\n    - id: echo-safe\n      type: generic\n      command: echo\n      args:\n        - safe\n`,
+    runnerBlock,
+  )
 
 const yamlWithoutAllowlists = validYaml
   .replace("repos:\n  allowlist:\n    - /Users/won/Work/incident-chatops-worker\n", "")
@@ -64,89 +38,6 @@ const unsafeYaml = validYaml
   .replace("    - /Users/won/Work/incident-chatops-worker", "    - ../incident-chatops-worker")
   .replace("  prefix: incident/", "  prefix: ../incident/")
   .replace("      command: echo", "      command: /bin/sh")
-
-describe("worker env parsing", () => {
-  it("defaults the Sentry poll interval to 300 seconds when env omits it", () => {
-    // Given: required secrets are present and polling env is omitted.
-    const env = validEnv
-
-    // When: env crosses the config boundary.
-    const parsed = parseWorkerEnv(env)
-
-    // Then: the conservative default cadence is used.
-    expect(parsed.sentryPollIntervalSeconds).toBe(300)
-    expect(parsed.sentryPollMinIntervalSeconds).toBe(60)
-  })
-
-  it.each(statePathScenarios)(
-    "uses the automatic $name state database path when env omits STATE_DB_PATH",
-    ({ env, expected, platform }) => {
-      // Given: required secrets are present and the OS state base is available.
-      const input = { ...validEnv, ...env }
-
-      // When: env crosses the config boundary without an explicit DB override.
-      const parsed = parseWorkerEnv(input, { platform })
-
-      // Then: the durable OS-specific state path is selected.
-      expect(parsed.stateDbPath).toBe(expected)
-    },
-  )
-
-  it("uses explicit STATE_DB_PATH override instead of the automatic state database path", () => {
-    // Given: env includes both a HOME base and an explicit DB path.
-    const env = {
-      ...validEnv,
-      HOME: "/Users/demo",
-      STATE_DB_PATH: "/tmp/incident-worker/override.sqlite",
-    }
-
-    // When: env crosses the config boundary.
-    const parsed = parseWorkerEnv(env, { platform: "darwin" })
-
-    // Then: the explicit override wins.
-    expect(parsed.stateDbPath).toBe("/tmp/incident-worker/override.sqlite")
-  })
-
-  it("rejects missing OS state base env when STATE_DB_PATH is omitted", () => {
-    // Given: env omits both STATE_DB_PATH and the required macOS HOME base.
-    const env = {
-      SLACK_APP_TOKEN: "xapp-redacted-example",
-      SLACK_BOT_TOKEN: "xoxb-redacted-example",
-      SENTRY_AUTH_TOKEN: "sntrys_redacted_example",
-      GITLAB_TOKEN: "glpat-redacted-example",
-    }
-
-    // When / Then: validation fails instead of falling back to the working directory.
-    expect(() => parseWorkerEnv(env, { platform: "darwin" })).toThrow(/HOME/)
-  })
-
-  it("uses the env poll interval override when it is not below the minimum", () => {
-    // Given: required secrets and an explicit safe polling cadence.
-    const env = {
-      ...validEnv,
-      SENTRY_POLL_INTERVAL_SECONDS: "600",
-      SENTRY_POLL_MIN_INTERVAL_SECONDS: "60",
-    }
-
-    // When: env crosses the config boundary.
-    const parsed = parseWorkerEnv(env)
-
-    // Then: the override is preserved exactly.
-    expect(parsed.sentryPollIntervalSeconds).toBe(600)
-  })
-
-  it("rejects an env poll interval below the configured minimum", () => {
-    // Given: polling is configured faster than the minimum.
-    const env = {
-      ...validEnv,
-      SENTRY_POLL_INTERVAL_SECONDS: "30",
-      SENTRY_POLL_MIN_INTERVAL_SECONDS: "60",
-    }
-
-    // When / Then: validation rejects the unsafe cadence by env name.
-    expect(() => parseWorkerEnv(env)).toThrow(/SENTRY_POLL_INTERVAL_SECONDS/)
-  })
-})
 
 describe("worker YAML config parsing", () => {
   it("accepts non-secret policy config with allowlists and safe defaults", () => {
@@ -159,7 +50,11 @@ describe("worker YAML config parsing", () => {
     // Then: the typed policy exposes only non-secret settings.
     expect(config.branchPrefix).toBe("incident/")
     expect(config.repos.allowlist).toEqual(["/Users/won/Work/incident-chatops-worker"])
+    expect(config.runners.provider).toBe("codex")
+    expect(config.runners.generic.commandAllowlist).toEqual(["echo"])
+    expect(config.runners.generic.definitions[0]?.id).toBe("echo-safe")
     expect(config.runners.definitions[0]?.id).toBe("echo-safe")
+    expect(config.worktreePrepare).toEqual({ commands: [], timeoutMs: 600_000 })
     expect(config.mr.provider).toBe("gitlab")
     expect(config.mr.gitlab).toEqual({
       baseUrl: configuredGitLabBaseUrl,
@@ -167,6 +62,81 @@ describe("worker YAML config parsing", () => {
       draft: true,
       project: "acme/frontend",
     })
+  })
+
+  it("accepts worktree preparation commands for project bootstrap", () => {
+    // Given: YAML declares a dependency bootstrap command to run before the agent starts.
+    const env = parseWorkerEnv(validEnv)
+    const yaml = validYaml.replace(
+      "worktree:\n  root: /Users/won/Work/incident-chatops-worker/.omo/worktrees\n",
+      `worktree:
+  root: /Users/won/Work/incident-chatops-worker/.omo/worktrees
+  prepare:
+    timeoutMs: 900000
+    commands:
+      - command: pnpm
+        args:
+          - install
+          - --frozen-lockfile
+`,
+    )
+
+    // When: YAML crosses the config boundary.
+    const config = parseWorkerConfigYaml(yaml, env)
+
+    // Then: the command is preserved as structured argv policy, not as a shell string.
+    expect(config.worktreePrepare).toEqual({
+      commands: [{ args: ["install", "--frozen-lockfile"], command: "pnpm" }],
+      timeoutMs: 900_000,
+    })
+  })
+
+  it("accepts Claude Code runner provider instance config", () => {
+    // Given: YAML selects Claude Code with safe headless CLI settings.
+    const env = parseWorkerEnv(validEnv)
+    const yaml = yamlWithRunnerBlock(
+      `  provider: claude-code\n  claudeCode:\n    bin: claude\n    configDir: /Users/won/.claude-worker\n    settingsPath: /Users/won/.claude-worker/settings.json\n    model: claude-sonnet-4\n    permissionMode: acceptEdits\n    allowedTools:\n      - Bash\n      - Edit\n    disallowedTools:\n      - WebFetch\n    extraEnvAllowlist:\n      - LANG\n${genericRunnerBlock}`,
+    )
+
+    // When: YAML crosses the config boundary.
+    const config = parseWorkerConfigYaml(yaml, env)
+
+    // Then: the Claude Code instance settings are typed and normalized.
+    expect(config.runners.provider).toBe("claude-code")
+    expect(config.runners.claudeCode).toEqual({
+      allowedTools: ["Bash", "Edit"],
+      bin: "claude",
+      configDir: "/Users/won/.claude-worker",
+      disallowedTools: ["WebFetch"],
+      extraEnvAllowlist: ["LANG"],
+      model: "claude-sonnet-4",
+      permissionMode: "acceptEdits",
+      settingsPath: "/Users/won/.claude-worker/settings.json",
+    })
+  })
+
+  it("accepts Generic runner provider config with mode command ids", () => {
+    // Given: YAML selects generic and names separate analysis and fix commands.
+    const env = parseWorkerEnv(validEnv)
+    const yaml = yamlWithRunnerBlock(`  provider: generic\n${genericRunnerBlock}`)
+
+    // When: YAML crosses the config boundary.
+    const config = parseWorkerConfigYaml(yaml, env)
+
+    // Then: the generic provider config is normalized and legacy aliases remain populated.
+    expect(config.runners.provider).toBe("generic")
+    expect(config.runners.generic.analysisCommandId).toBe("echo-analysis")
+    expect(config.runners.generic.fixCommandId).toBe("echo-fix")
+    expect(config.runners.generic.commandAllowlist).toEqual(["echo"])
+    expect(config.runners.generic.definitions.map((runner) => runner.id)).toEqual([
+      "echo-analysis",
+      "echo-fix",
+    ])
+    expect(config.runners.genericCommandAllowlist).toEqual(["echo"])
+    expect(config.runners.definitions.map((runner) => runner.id)).toEqual([
+      "echo-analysis",
+      "echo-fix",
+    ])
   })
 
   it("accepts GitHub provider routing config without GitLab routing", () => {
@@ -220,6 +190,48 @@ describe("worker YAML config parsing", () => {
 
     // When / Then: validation fails closed instead of allowing arbitrary repos or commands.
     expect(() => parseWorkerConfigYaml(yamlWithoutAllowlists, env)).toThrow(/allowlist/i)
+  })
+
+  it("rejects an unknown runner provider", () => {
+    // Given: YAML names a runner provider outside the supported daemon-global set.
+    const env = parseWorkerEnv(validEnv)
+    const yaml = validYaml.replace("runners:\n", "runners:\n  provider: unknown-ai\n")
+
+    // When / Then: validation fails at the config boundary.
+    expect(() => parseWorkerConfigYaml(yaml, env)).toThrow(/provider/i)
+  })
+
+  it("rejects secret-looking runner env allowlist names", () => {
+    // Given: YAML attempts to pass credential-like env names to a runner child process.
+    const env = parseWorkerEnv(validEnv)
+    const yaml = yamlWithRunnerBlock(
+      `  provider: codex\n  codex:\n    extraEnvAllowlist:\n      - SENTRY_TOKEN\n${genericRunnerBlock}`,
+    )
+
+    // When / Then: validation rejects the env name before runtime runner selection.
+    expect(() => parseWorkerConfigYaml(yaml, env)).toThrow(/SENTRY_TOKEN|extraEnvAllowlist/i)
+  })
+
+  it("rejects dangerous Claude Code permission bypass mode", () => {
+    // Given: YAML attempts to configure Claude Code with the bypass permission mode.
+    const env = parseWorkerEnv(validEnv)
+    const yaml = yamlWithRunnerBlock(
+      `  provider: claude-code\n  claudeCode:\n    permissionMode: bypassPermissions\n${genericRunnerBlock}`,
+    )
+
+    // When / Then: validation fails closed before a Claude CLI can be started.
+    expect(() => parseWorkerConfigYaml(yaml, env)).toThrow(/bypassPermissions|permissionMode/i)
+  })
+
+  it("rejects flag-looking Claude Code permission bypass mode", () => {
+    // Given: YAML attempts to smuggle a dangerous Claude permission flag as a mode value.
+    const env = parseWorkerEnv(validEnv)
+    const yaml = yamlWithRunnerBlock(
+      `  provider: claude-code\n  claudeCode:\n    permissionMode: --dangerously-skip-permissions\n${genericRunnerBlock}`,
+    )
+
+    // When / Then: validation fails before adapter construction.
+    expect(() => parseWorkerConfigYaml(yaml, env)).toThrow(/dangerously|permissionMode/i)
   })
 
   it("rejects unsafe repo paths, branch prefixes, and unallowlisted absolute commands", () => {

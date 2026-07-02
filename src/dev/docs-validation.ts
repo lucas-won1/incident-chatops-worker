@@ -11,6 +11,7 @@ import {
   hasReadmeLink,
   hasUnsupportedDocsSurface,
 } from "./docs-surface-scan.js"
+import { hasRunnerProviderBlocks, hasRunnerProviderDocs } from "./runner-docs-validation.js"
 import {
   hasProviderCliShelloutSurface,
   hasServerCreationSurface,
@@ -185,6 +186,11 @@ export const validateDocs = (args: readonly string[]): CliResult => {
     ),
     check("required YAML example present", readableFile(yamlExamplePath)),
     check("YAML example parses", yamlParses(yamlExample)),
+    check("YAML example uses runner provider blocks", hasRunnerProviderBlocks(yamlExample)),
+    check(
+      "docs explain runner provider instances",
+      hasRunnerProviderDocs(`${readme}\n${docsText}`),
+    ),
     check("README documents Slack approval", hasSlackApprovalGate(readme)),
     check("README documents no-webhook default", readmeNoWebhookPattern.test(readme)),
     check("YAML example has no secret-looking values", !hasAnySecretMarker(yamlExample)),

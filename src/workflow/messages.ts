@@ -29,9 +29,13 @@ export const buildWorkflowStatusMessage = (
   text: string,
 ): SlackRenderedMessage => sectionMessage({ channelId, threadTs, text })
 
-export const safeErrorText = (prefix: string, error: unknown): string => {
+export const safeErrorText = (
+  prefix: string,
+  error: unknown,
+  secretValues: readonly string[] = [],
+): string => {
   if (error instanceof Error) {
-    return `${prefix}: ${redactSensitiveText(error.message)}`
+    return `${prefix}: ${redactSensitiveText(error.message, secretValues)}`
   }
   return `${prefix}: unknown failure`
 }

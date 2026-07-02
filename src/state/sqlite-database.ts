@@ -7,6 +7,7 @@ import { StateStoreOpenError } from "./errors.js"
 
 const SQL = await initSqlJs()
 const ownerOnlyDatabaseMode = 0o600
+type DatabaseAccessMode = "read" | "write"
 
 const repairDatabaseMode = (path: string): void => {
   try {
@@ -22,6 +23,7 @@ const repairDatabaseMode = (path: string): void => {
 export const readDatabaseBytes = (
   path: string,
   createIfMissing: boolean,
+  accessMode: DatabaseAccessMode,
 ): Uint8Array | undefined => {
   if (!existsSync(path)) {
     if (createIfMissing) {
@@ -31,7 +33,9 @@ export const readDatabaseBytes = (
   }
 
   try {
-    repairDatabaseMode(path)
+    if (accessMode === "write") {
+      repairDatabaseMode(path)
+    }
     return readFileSync(path)
   } catch (error) {
     if (error instanceof Error) {
@@ -41,8 +45,12 @@ export const readDatabaseBytes = (
   }
 }
 
-export const openDatabase = (path: string, createIfMissing: boolean): Database => {
-  const bytes = readDatabaseBytes(path, createIfMissing)
+export const openDatabase = (
+  path: string,
+  createIfMissing: boolean,
+  accessMode: DatabaseAccessMode = "write",
+): Database => {
+  const bytes = readDatabaseBytes(path, createIfMissing, accessMode)
   return bytes === undefined ? new SQL.Database() : new SQL.Database(bytes)
 }
 

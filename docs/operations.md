@@ -13,7 +13,7 @@ cp .env.example .env
 cp incident-worker.config.example.yaml incident-worker.config.yaml
 ```
 
-`.env`에는 Slack, Sentry, selected Git provider 토큰과 운영 값을 넣는다. `incident-worker.config.yaml`에는 Sentry 프로젝트 매핑, Slack 채널, repo allowlist, worktree root, runner allowlist, Git provider MR/PR 정책처럼 비밀이 아닌 정책만 둔다. 실제 토큰, auth header, cookie 값을 YAML이나 문서에 넣지 않는다.
+`.env`에는 Slack, Sentry, selected Git provider 토큰과 운영 값을 넣는다. `incident-worker.config.yaml`에는 Sentry 프로젝트 매핑, Slack 채널, repo allowlist, worktree root, `worktree.prepare`, `runners.provider`, `runners.codex`, `runners.claudeCode`, `runners.generic`, Git provider MR/PR 정책처럼 비밀이 아닌 정책만 둔다. 실제 토큰, auth header, cookie 값을 YAML이나 문서에 넣지 않는다.
 
 첫 점검은 `doctor`로 한다.
 
@@ -21,7 +21,7 @@ cp incident-worker.config.example.yaml incident-worker.config.yaml
 node dist/cli.js doctor --env-file .env --config incident-worker.config.yaml
 ```
 
-`doctor`는 설정 파싱, polling interval, repo allowlist, runner 정의, 토큰 존재 여부를 확인한다. 일반 운영에서는 토큰 reachability도 점검하므로 실제 네트워크와 권한이 필요할 수 있다. 예제 값만 확인할 때는 `--example-mode`를 붙여 reachability를 건너뛸 수 있다.
+`doctor`는 설정 파싱, polling interval, repo allowlist, 선택된 runner provider, provider별 safe status, 토큰 존재 여부를 확인한다. 일반 운영에서는 토큰 reachability도 점검하므로 실제 네트워크와 권한이 필요할 수 있다. 예제 값만 확인할 때는 `--example-mode`를 붙여 reachability를 건너뛸 수 있다.
 
 ```bash
 node dist/cli.js doctor --example-mode --env-file .env --config incident-worker.config.yaml
@@ -126,6 +126,42 @@ node dist/cli.js logs --db "$STATE_DB_PATH"
 
 `logs --db`는 직접 지정한 SQLite 파일을 읽는 override이다. 일반 운영에서는 `logs --env-file --config`가 daemon/status와 같은 automatic-or-overridden state DB 경로를 resolve한다.
 
+## Incident handoff MCP와 Codex App follow-up
+
+MR/PR이 생성된 fix job은 Codex App 후속 작업을 위한 handoff context를 SQLite에 저장한다. 저장된 값은 issue id, repo id/path, MR/PR URL, `sourceBranch`, target branch, `headSha`, 분석/변경/검증 요약, readiness, follow-up prompt이며 raw Sentry payload는 포함하지 않는다.
+
+MCP server는 저장된 handoff만 읽는 stdio surface다.
+
+```bash
+node dist/cli.js mcp --db <state.sqlite>
+```
+
+`--db`를 생략하면 `STATE_DB_PATH` 또는 OS별 automatic DB path를 사용한다. 이 command는 token-light/read-only로 동작한다. Slack, Sentry, GitLab, GitHub, runner token을 요구하지 않고 daemon, polling, runner, branch push, MR/PR 생성을 시작하지 않는다. DB가 없거나 migration이 적용되지 않았으면 token 오류가 아니라 SQLite open/read 오류를 먼저 해결한다.
+
+Codex App에서 후속 수정을 이어가려면 이 repo의 `plugins/incident-handoff` plugin을 설치하거나 활성화하고, Local project에서 다음처럼 호출한다.
+
+```text
+$incident <issue-id>
+```
+
+이 저장소에는 repo-local marketplace가 포함되어 있다.
+
+- `.agents/plugins/marketplace.json`: Codex가 읽는 repo marketplace
+- `plugins/incident-handoff/.codex-plugin/plugin.json`: plugin manifest
+- `plugins/incident-handoff/skills/incident/SKILL.md`: `$incident` skill
+- `plugins/incident-handoff/.mcp.json`: `incident_handoff` MCP server 설정
+
+운영자는 먼저 `pnpm build`로 `dist/cli.js`를 만든다. Codex App에서는 이 저장소를 Local project로 열고 Codex를 재시작한 뒤 **Plugins**에서 `Incident Handoff`를 찾아 **Add to Codex**로 설치한다. CLI에서는 이 저장소에서 `codex`를 열고 `/plugins`를 실행한 뒤 `incident-chatops-worker` marketplace의 `incident-handoff` plugin을 설치한다. marketplace가 자동으로 보이지 않으면 다음처럼 repo root를 추가한다.
+
+```bash
+codex plugin marketplace add /Users/won/Work/incident-chatops-worker
+codex plugin marketplace list
+```
+
+plugin MCP command는 repo 안의 `node ../../dist/cli.js mcp`를 실행한다. daemon과 다른 SQLite 파일을 쓰는 운영이면 Codex 실행 환경에 `STATE_DB_PATH=<state.sqlite>`를 설정하거나, local copy의 `.mcp.json`에 `--db <state.sqlite>`를 명시한다. 이 설정은 service token을 요구하지 않는다.
+
+plugin은 MCP에서 handoff를 읽고 `sourceBranch` 기준으로 Codex App-managed worktree를 만들거나 같은 incident App worktree를 계속 사용한다. default branch에서 새로 시작하거나 worker-created worktree folder를 후속 수정 대상으로 삼지 않는다. 이미 같은 incident App worktree 안에 있다면 public git checks로 현재 `HEAD`가 `headSha`와 같거나 `headSha`가 현재 `HEAD`의 ancestor이고 branch/upstream/ref가 `sourceBranch`와 충돌하지 않는지 확인한다. unrelated App worktree에서 실행했다면 Local project로 돌아가 `$incident <issue-id>`를 다시 호출한다.
+
 ## Audit review
 
 정기 review에서는 다음을 확인한다.
@@ -172,6 +208,10 @@ node dist/cli.js status --env-file .env --config incident-worker.config.yaml
 ## Worktree와 state cleanup
 
 runner가 사용하는 worktree root는 config의 `worktree.root`가 정한다. 정상 workflow는 작업 후 worktree cleanup을 시도하지만, 실패 audit이 남거나 호스트가 중단된 경우에는 Git 상태를 직접 확인해야 한다.
+
+`analysis_only`는 worker worktree를 만들지 않는다. source repo에서 직접 읽기 전용 runner를 실행하고, `worktree.prepare`도 실행하지 않는다. 분석 전에 source repo가 clean이어야 하며 분석 runner가 파일을 만들거나 수정하면 실패한다.
+
+`fix_and_mr`는 worker git worktree를 만들고 `worktree.prepare`, runner, verification, push, MR/PR, handoff 저장을 마친 뒤 cleanup한다. cleanup 실패는 audit로 남기되 이미 만들어진 MR/PR과 handoff 결과를 지우지 않는다.
 
 cleanup 전에는 반드시 다음을 확인한다.
 

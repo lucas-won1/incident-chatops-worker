@@ -1,4 +1,5 @@
 export {
+  WorkflowDirtySourceError,
   WorkflowPolicyError,
   WorkflowSentryContextError,
   WorkflowVerificationFailedError,
@@ -11,5 +12,7 @@ export type {
   WorkflowRepoAdapter,
   WorkflowSlackPublisher,
   WorkflowStateStore,
+  WorkflowWorktreePrepareRequest,
+  WorkflowWorktreePreparer,
   WorkflowWorktreeSession,
 } from "./types.js"

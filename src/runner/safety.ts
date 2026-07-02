@@ -3,7 +3,7 @@ import { RunnerPolicyError } from "./errors.js"
 
 export const defaultRunnerTimeoutMs = 1_800_000
 export const defaultOutputLimitBytes = 200 * 1024
-export const defaultEnvAllowlist = ["PATH", "HOME", "CODEX_HOME"] as const
+export const defaultEnvAllowlist = ["PATH", "HOME"] as const
 
 const dangerousCodexFlagValue = (arg: string): string => arg.split("=", 1)[0] ?? arg
 
@@ -32,13 +32,16 @@ const executableWhitespace = /\s/u
 const mutationWords = new Set([
   "commit",
   "push",
+  "merge_request",
   "merge-request",
   "merge_requests",
+  "pull_request",
   "pull-request",
   "pull_requests",
   "mr",
   "pr",
 ])
+const genericRunnerDeniedExecutables = new Set(["git", "gh", "glab"])
 
 const shellInterpreters = new Set([
   "sh",
@@ -61,29 +64,6 @@ const executableName = (command: string): string => {
 
 const isShellInterpreterToken = (token: string): boolean =>
   shellInterpreters.has(executableName(token))
-
-const splitPolicyTokens = (value: string): readonly string[] =>
-  value
-    .toLowerCase()
-    .split(/[\s"']+/u)
-    .filter(Boolean)
-
-const envSplitStringValue = (args: readonly string[], index: number): string | undefined => {
-  const arg = args[index]
-  if (arg === undefined) {
-    return undefined
-  }
-  if (envSplitStringFlags.has(arg)) {
-    return args[index + 1]
-  }
-  if (arg.startsWith("--split-string=")) {
-    return arg.slice("--split-string=".length)
-  }
-  if (arg.startsWith("-S") && arg.length > 2) {
-    return arg.slice(2)
-  }
-  return undefined
-}
 
 export const redactRunnerOutput = (
   value: string,
@@ -145,30 +125,32 @@ export const rejectShellInterpreterCommand = (
   if (args.some((arg) => isShellInterpreterToken(arg))) {
     throw new RunnerPolicyError(`${label} must not use shell interpreter command strings`)
   }
-  if (executableName(command) === "env") {
-    for (let index = 0; index < args.length; index += 1) {
-      const splitString = envSplitStringValue(args, index)
-      if (splitString === undefined) {
-        continue
-      }
-      const splitTokens = splitPolicyTokens(splitString)
-      if (splitTokens.some((token) => isShellInterpreterToken(token))) {
-        throw new RunnerPolicyError(`${label} must not use shell interpreter command strings`)
-      }
-    }
+  if (
+    executableName(command) === "env" &&
+    args.some(
+      (arg) =>
+        envSplitStringFlags.has(arg) ||
+        arg.startsWith("--split-string=") ||
+        (arg.startsWith("-S") && arg.length > 2),
+    )
+  ) {
+    throw new RunnerPolicyError(`${label} must not use env split-string`)
   }
 }
 
-export const ensureAnalysisCommandSafe = (tokens: readonly string[]): void => {
+export const ensureGenericCommandSafe = (tokens: readonly string[]): void => {
+  if (tokens.some((token) => genericRunnerDeniedExecutables.has(executableName(token)))) {
+    throw new RunnerPolicyError("generic runner denies workflow-owned git and provider commands")
+  }
   const lowered = tokens.flatMap((token) => token.toLowerCase().split(/\s+/u).filter(Boolean))
   if (lowered.some((token) => mutationWords.has(token))) {
-    throw new RunnerPolicyError("analysis_only mode denies commit, push, and MR commands")
+    throw new RunnerPolicyError("generic runner denies workflow-owned git, MR, and PR commands")
   }
   if (
     lowered.includes("gitlab") ||
     (lowered.includes("glab") && lowered.includes("mr")) ||
     (lowered.includes("gh") && lowered.includes("pr"))
   ) {
-    throw new RunnerPolicyError("analysis_only mode denies commit, push, and MR commands")
+    throw new RunnerPolicyError("generic runner denies workflow-owned git, MR, and PR commands")
   }
 }

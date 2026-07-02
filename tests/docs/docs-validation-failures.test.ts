@@ -58,6 +58,51 @@ describe("docs validation failure coverage", () => {
     expect(result.stdout).toContain("FAIL no raw secret patterns")
   })
 
+  it("fails docs validation when runner provider docs are stale", async () => {
+    // Given: complete public docs whose YAML example still uses only legacy runner keys.
+    const fixtureRoot = await createFixtureRoot("incident-docs-stale-runner-provider-")
+    await writeValidDocsFixture(fixtureRoot, {
+      ...strictValidDocsOverrides,
+      "incident-worker.config.example.yaml": [
+        "sentry:",
+        "  projects:",
+        "    - organizationSlug: demo-org",
+        "      projectSlug: frontend",
+        '      slackChannel: "#incidents"',
+        "repos:",
+        "  allowlist:",
+        "    - /repo",
+        "worktree:",
+        "  root: /repo/.worktrees",
+        "branch:",
+        "  prefix: incident/",
+        "slack:",
+        "  channels:",
+        '    default: "#incidents"',
+        "runners:",
+        "  genericCommandAllowlist:",
+        "    - echo",
+        "  definitions:",
+        "    - id: echo-safe",
+        "      type: generic",
+        "      command: echo",
+        "mr:",
+        "  provider: gitlab",
+        "  gitlab:",
+        "    baseUrl: https://gitlab.com/api/v4",
+        "    project: demo-org/frontend",
+        "  defaultTargetBranch: main",
+      ].join("\n"),
+    })
+
+    // When: docs validation scans stale runner examples.
+    const result = await runCliAsync(["dev", "validate-docs", "--root", fixtureRoot])
+
+    // Then: provider-block coverage fails instead of accepting legacy-only examples.
+    expect(result.exitCode).not.toBe(0)
+    expect(result.stdout).toContain("FAIL YAML example uses runner provider blocks")
+  })
+
   it.each(githubSecretPrefixes)(
     "fails docs validation when public docs contain a raw GitHub token prefix: %s",
     async (prefix) => {
