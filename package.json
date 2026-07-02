@@ -24,6 +24,7 @@
     "vitest": "3.2.4"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@slack/bolt": "^4.7.3",
     "ky": "^2.0.2",
     "sql.js": "^1.14.1",

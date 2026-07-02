@@ -142,7 +142,7 @@ export const buildInitialIncidentMessage = (
   const incident = parseMessageIncident(input)
   const value = actionValue(incident.issueId, incident.repoId)
   const lines = [
-    "*새 Sentry incident detected*",
+    "*새 Sentry incident가 감지되었습니다*",
     `*Issue:* ${redactAndTruncate(input.title, 300)}`,
     safeLine("Culprit", input.culprit),
     safeLine("Link", input.permalink),
@@ -151,7 +151,7 @@ export const buildInitialIncidentMessage = (
   return {
     channel: incident.channel,
     threadTs: incident.threadTs,
-    text: `Incident detected: ${redactAndTruncate(input.title, 180)}`,
+    text: `Sentry incident 감지: ${redactAndTruncate(input.title, 180)}`,
     blocks: [
       {
         type: "section",
@@ -182,7 +182,7 @@ export const buildAnalysisCompleteMessage = (
   return {
     channel,
     threadTs,
-    text: `Analysis completed for ${redactSensitiveText(input.issueId)}`,
+    text: `${redactSensitiveText(input.issueId)} 분석 완료`,
     blocks: [
       {
         type: "section",

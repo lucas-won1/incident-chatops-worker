@@ -55,7 +55,7 @@ export type MergeRequestAuditEvent =
     })
   | (MergeRequestAuditBase & {
       readonly action: "merge_request.labels.failed"
-      readonly kind: MergeRequestApiErrorKind
+      readonly kind: MergeRequestApiErrorKind | "transport"
       readonly stage: "labels"
       readonly statusCode: number | undefined
     })

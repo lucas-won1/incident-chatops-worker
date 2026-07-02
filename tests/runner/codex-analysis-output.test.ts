@@ -52,8 +52,17 @@ const runAnalysis = async (runner: CodexExecRunner) =>
     allowedCommands: ["pnpm test"],
     incidentContext,
     mode: "analysis_only",
-    repositoryConstraints: "Use only the approved worktree.",
-    worktreePath: "/tmp/incident-worktree",
+    repositoryConstraints: "Use only the approved workspace.",
+    workspacePath: "/tmp/incident-workspace",
+  })
+
+const runFix = async (runner: CodexExecRunner) =>
+  runner.run({
+    allowedCommands: ["pnpm test"],
+    incidentContext,
+    mode: "fix_and_mr",
+    repositoryConstraints: "Use only the approved workspace.",
+    workspacePath: "/tmp/incident-workspace",
   })
 
 describe("Codex analysis-only structured output", () => {
@@ -120,6 +129,34 @@ describe("Codex analysis-only structured output", () => {
     try {
       // When / Then: the adapter fails closed at the structured JSON boundary.
       await expect(runAnalysis(runner)).rejects.toThrow(RunnerOutputParseError)
+    } finally {
+      rmSync(outputRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("returns runner-authored merge request body from fix output", async () => {
+    // Given: Codex writes a complete project-aware MR body in the fix last-message JSON.
+    const outputRoot = mkdtempSync(path.join(tmpdir(), "incident-codex-fix-output-"))
+    const runner = createRunner(
+      outputRoot,
+      new LastMessageProcess(
+        JSON.stringify({
+          analysis: "원인",
+          branchInfo: "incident/SENTRY-123",
+          changesSummary: "수정",
+          mergeRequestBody: "## 요약\n\n- 프로젝트 규칙 반영",
+          mrReadiness: "준비됨",
+          verificationResults: "passed: pnpm test",
+        }),
+      ),
+    )
+
+    try {
+      // When: fix execution completes successfully.
+      const result = await runFix(runner)
+
+      // Then: workflow-visible MR body comes from structured runner output.
+      expect(result.mergeRequestBody).toBe("## 요약\n\n- 프로젝트 규칙 반영")
     } finally {
       rmSync(outputRoot, { recursive: true, force: true })
     }

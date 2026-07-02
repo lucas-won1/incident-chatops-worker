@@ -13,7 +13,14 @@ type PackageMetadata = {
   readonly dependencies?: unknown
 }
 
-const allowedRuntimeDependencies = new Set(["@slack/bolt", "ky", "sql.js", "yaml", "zod"])
+const allowedRuntimeDependencies = new Set([
+  "@modelcontextprotocol/sdk",
+  "@slack/bolt",
+  "ky",
+  "sql.js",
+  "yaml",
+  "zod",
+])
 const allowedDevSubcommands = new Set([
   "parse-action",
   "parse-slack-action",

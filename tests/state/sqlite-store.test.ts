@@ -4,7 +4,7 @@ import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
 
-import { openSqliteStateStore, StateStoreConstraintError } from "../../src/state/sqlite-store.js"
+import { openSqliteStateStore } from "../../src/state/sqlite-store.js"
 
 const tempDirs: string[] = []
 
@@ -160,115 +160,6 @@ describe("SQLite state store", () => {
     expect(entry?.details).not.toContain("sntrys_abc123")
     expect(entry?.details).not.toContain("glpat-123456")
     expect(entry?.details.length).toBeLessThanOrEqual(2048)
-    store.close()
-  })
-
-  it("claims Slack actions idempotently and enforces one active job per incident", () => {
-    // Given: one incident already exists.
-    const store = openSqliteStateStore({ path: createTempDbPath() })
-    const incident = store.upsertIncident({
-      issueId: "SENTRY-123",
-      repoId: "repo-api",
-      channelId: "C123",
-      threadTs: "1712345678.000100",
-      title: "Checkout crash",
-      firstSeenAt: "2026-06-26T00:00:00.000Z",
-      lastSeenAt: "2026-06-26T00:01:00.000Z",
-    })
-
-    // When: a Slack action is claimed twice and a second action tries to start another job.
-    const firstClaim = store.claimJobForSlackAction({
-      incidentId: incident.incidentId,
-      actionIdempotencyKey: "slack-action-1",
-      jobKind: "analysis",
-      actor: "slack:U123",
-      now: "2026-06-26T00:05:00.000Z",
-    })
-    const duplicateClaim = store.claimJobForSlackAction({
-      incidentId: incident.incidentId,
-      actionIdempotencyKey: "slack-action-1",
-      jobKind: "analysis",
-      actor: "slack:U123",
-      now: "2026-06-26T00:05:01.000Z",
-    })
-    const secondActiveJob = (): unknown =>
-      store.claimJobForSlackAction({
-        incidentId: incident.incidentId,
-        actionIdempotencyKey: "slack-action-2",
-        jobKind: "fix",
-        actor: "slack:U123",
-        now: "2026-06-26T00:05:02.000Z",
-      })
-
-    // Then: duplicate action returns the original job and active-job races are rejected.
-    expect(firstClaim.claimStatus).toBe("claimed")
-    expect(duplicateClaim).toMatchObject({
-      actionIdempotencyKey: firstClaim.actionIdempotencyKey,
-      incidentId: firstClaim.incidentId,
-      jobId: firstClaim.jobId,
-      jobKind: firstClaim.jobKind,
-      state: firstClaim.state,
-      claimStatus: "duplicate",
-    })
-    expect(secondActiveJob).toThrow(StateStoreConstraintError)
-    store.close()
-  })
-
-  it("holds a global concurrency lease until terminal job state releases it", () => {
-    // Given: two incidents compete for the default single global worker lease.
-    const store = openSqliteStateStore({ path: createTempDbPath() })
-    const firstIncident = store.upsertIncident({
-      issueId: "SENTRY-123",
-      repoId: "repo-api",
-      channelId: "C123",
-      threadTs: "1712345678.000100",
-      title: "Checkout crash",
-      firstSeenAt: "2026-06-26T00:00:00.000Z",
-      lastSeenAt: "2026-06-26T00:01:00.000Z",
-    })
-    const secondIncident = store.upsertIncident({
-      issueId: "SENTRY-456",
-      repoId: "repo-api",
-      channelId: "C123",
-      threadTs: "1712345678.000200",
-      title: "Profile crash",
-      firstSeenAt: "2026-06-26T00:00:00.000Z",
-      lastSeenAt: "2026-06-26T00:01:00.000Z",
-    })
-    const firstJob = store.claimJobForSlackAction({
-      incidentId: firstIncident.incidentId,
-      actionIdempotencyKey: "slack-action-1",
-      jobKind: "analysis",
-      actor: "slack:U123",
-      now: "2026-06-26T00:05:00.000Z",
-    })
-
-    // When: another incident attempts to claim a job before and after the first job completes.
-    const blockedByGlobalLease = (): unknown =>
-      store.claimJobForSlackAction({
-        incidentId: secondIncident.incidentId,
-        actionIdempotencyKey: "slack-action-2",
-        jobKind: "analysis",
-        actor: "slack:U234",
-        now: "2026-06-26T00:05:01.000Z",
-      })
-    expect(blockedByGlobalLease).toThrow(StateStoreConstraintError)
-    store.completeJob({
-      jobId: firstJob.jobId,
-      state: "completed",
-      finishedAt: "2026-06-26T00:06:00.000Z",
-    })
-    const secondJob = store.claimJobForSlackAction({
-      incidentId: secondIncident.incidentId,
-      actionIdempotencyKey: "slack-action-2",
-      jobKind: "analysis",
-      actor: "slack:U234",
-      now: "2026-06-26T00:06:01.000Z",
-    })
-
-    // Then: the lease rejects overlap but terminal state frees capacity.
-    expect(secondJob.jobId).not.toBe(firstJob.jobId)
-    expect(secondJob.claimStatus).toBe("claimed")
     store.close()
   })
 })

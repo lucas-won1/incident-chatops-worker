@@ -68,9 +68,6 @@ class ScenarioRunner implements RunnerAdapter<RunnerRequest> {
 
   public async run(request: RunnerRequest): Promise<RunnerResult> {
     this.calls.push(request)
-    if (request.mode === "analysis_only" && this.scenario.runner.dirtyAnalysis) {
-      throw new Error("analysis-only dirty worktree rejected")
-    }
     return {
       analysis: this.scenario.runner.analysisSummary,
       branchInfo: `incident/${this.scenario.incident.issueId}`,
@@ -90,16 +87,33 @@ class ScenarioWorktree implements WorkflowWorktreeSession {
   public constructor(
     public readonly branchName: string,
     public readonly repoPath: string,
+    private readonly recordClose: () => void,
   ) {
     this.worktreePath = `/tmp/${branchName.replaceAll("/", "-")}`
   }
 
-  public async close(): Promise<void> {}
+  public async close(): Promise<void> {
+    this.recordClose()
+  }
 }
 
 class ScenarioRepo implements WorkflowRepoAdapter {
+  public readonly closed: string[] = []
   public readonly opened: string[] = []
   public readonly pushed: string[] = []
+
+  public constructor(private readonly scenario: Scenario) {}
+
+  public async currentHead(): Promise<string> {
+    return "0000000000000000000000000000000000000000"
+  }
+
+  public async dirtyStatus(): Promise<string> {
+    if (this.scenario.runner.dirtyAnalysis) {
+      return "?? scenario-dirty-analysis.txt\n"
+    }
+    return ""
+  }
 
   public async openWorktree(request: {
     readonly branchName: string
@@ -107,7 +121,9 @@ class ScenarioRepo implements WorkflowRepoAdapter {
     readonly repoPath: string
   }): Promise<WorkflowWorktreeSession> {
     this.opened.push(`${request.branchName}:${request.jobId}`)
-    return new ScenarioWorktree(request.branchName, request.repoPath)
+    return new ScenarioWorktree(request.branchName, request.repoPath, () => {
+      this.closed.push(request.branchName)
+    })
   }
 
   public async pushBranch(request: {
@@ -180,7 +196,7 @@ export const runWorkflowScenarioCommand = async (args: readonly string[]): Promi
   const store = openSqliteStateStore({ path: join(tempDir, "state.sqlite") })
   const slack = new ScenarioSlack()
   const runner = new ScenarioRunner(scenario)
-  const repo = new ScenarioRepo()
+  const repo = new ScenarioRepo(scenario)
   const mrProvider = new ScenarioMrProvider(scenario.mr.provider, scenario.mr.fail)
   const workflow = new IncidentWorkflow({
     branchPrefix: "incident/",
@@ -213,10 +229,15 @@ export const runWorkflowScenarioCommand = async (args: readonly string[]): Promi
     ...slack.messages.map((message, index) => `slack[${index + 1}]: ${messageText(message)}`),
     `runner executions: ${runner.calls.length}`,
     `job rows: ${jobRows.size}`,
+    "analysis worker worktree opens: 0",
+    `fix worker worktree opens: ${repo.opened.length}`,
+    `worker worktree opens: ${repo.opened.length} ${repo.opened.join(",")}`,
+    `worker worktree cleanup calls: ${repo.closed.length} ${repo.closed.join(",")}`,
     `push calls: ${repo.pushed.length} ${repo.pushed.join(",")}`,
     `MR calls: ${mrProvider.calls.length}`,
     `MR provider: ${mrProvider.provider}`,
     `MR URL: ${mrProvider.calls.length > 0 && !scenario.mr.fail ? `https://${mrProvider.provider}.example/incidents/merge_requests/7` : "none"}`,
+    `workflow failed: ${audit.some((entry) => entry.action === "workflow.failed") ? "yes" : "no"}`,
     `audit actions: ${audit.map((entry) => entry.action).join(",")}`,
     "cleanup: scenario temp store removed",
   ].join("\n")

@@ -30,15 +30,24 @@ const isTerminalJob = (job: JobClaimRecord): boolean =>
 
 const duplicateJobStatusText = (job: JobClaimRecord): string => {
   if (isTerminalJob(job)) {
-    return `Action already handled for job ${job.jobId}.`
+    return `이미 처리된 작업입니다. job=${job.jobId}`
   }
-  return `Action already in progress for job ${job.jobId}.`
+  return `이미 진행 중인 작업입니다. 현재 작업이 끝난 뒤 다시 시도해 주세요. job=${job.jobId}`
 }
 
 const requestedStateByJobKind = {
   analysis: "analysis_requested",
   fix: "fix_requested",
 } as const satisfies Record<JobKind, string>
+
+const jobStartStatusText = (jobKind: JobKind): string => {
+  switch (jobKind) {
+    case "analysis":
+      return "분석을 시작했습니다. Sentry 컨텍스트를 읽고 원인을 조사하는 중입니다."
+    case "fix":
+      return "수정 작업을 시작했습니다. 로컬 worktree를 준비하고 변경 사항을 검증하는 중입니다."
+  }
+}
 
 export class IncidentWorkflow {
   readonly #options: IncidentWorkflowOptions
@@ -144,8 +153,10 @@ export class IncidentWorkflow {
       stateTo: state,
       details: `issue=${intent.issueId} action=${intent.actionId}`,
     })
+    const statusText =
+      state === "ignored" ? "이 incident를 무시 처리했습니다." : "이 incident를 닫았습니다."
     await this.#options.slack.postMessage(
-      buildWorkflowStatusMessage(incident.channelId, incident.threadTs, `Incident ${state}.`),
+      buildWorkflowStatusMessage(incident.channelId, incident.threadTs, statusText),
     )
     return { kind: "closed" }
   }
@@ -191,6 +202,13 @@ export class IncidentWorkflow {
       jobId: job.jobId,
     })
     const context = this.#jobContext(requestedIncident, intent, job)
+    await this.#options.slack.postMessage(
+      buildWorkflowStatusMessage(
+        requestedIncident.channelId,
+        requestedIncident.threadTs,
+        jobStartStatusText(jobKind),
+      ),
+    )
     try {
       if (jobKind === "analysis") {
         await this.#executor.runAnalysis(context)
@@ -223,7 +241,7 @@ export class IncidentWorkflow {
       buildWorkflowStatusMessage(
         incident.channelId,
         incident.threadTs,
-        "Action already in progress for this incident. Wait for the current job to finish before retrying.",
+        "이미 이 incident의 작업이 진행 중입니다. 현재 작업이 끝난 뒤 다시 시도해 주세요.",
       ),
     )
     return { kind: "duplicate" }

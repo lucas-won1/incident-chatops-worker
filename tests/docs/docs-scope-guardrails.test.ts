@@ -65,6 +65,36 @@ describe("docs scope guardrails", () => {
     expect(result.stdout).toContain("PASS only GitLab/GitHub providers are shipped")
   })
 
+  it("allows the MCP SDK runtime dependency while rejecting arbitrary runtime dependencies", async () => {
+    // Given: one fixture with the approved MCP SDK and another with an arbitrary package.
+    const mcpRoot = await createFixtureRoot("incident-mcp-dependency-scope-")
+    await writeMinimalDocsFixture(mcpRoot, {
+      "package.json": JSON.stringify({
+        dependencies: { "@modelcontextprotocol/sdk": "1.29.0" },
+      }),
+    })
+    const arbitraryRoot = await createFixtureRoot("incident-arbitrary-dependency-scope-")
+    await writeMinimalDocsFixture(arbitraryRoot, {
+      "package.json": JSON.stringify({ dependencies: { "left-pad": "1.3.0" } }),
+    })
+
+    // When: strict scope verification scans both dependency sets.
+    const mcpResult = await runCliAsync(["dev", "verify-scope", "--strict", "--root", mcpRoot])
+    const arbitraryResult = await runCliAsync([
+      "dev",
+      "verify-scope",
+      "--strict",
+      "--root",
+      arbitraryRoot,
+    ])
+
+    // Then: only the approved MCP SDK dependency is accepted.
+    expect(mcpResult.exitCode).toBe(0)
+    expect(mcpResult.stdout).toContain("PASS no GUI dependency")
+    expect(arbitraryResult.exitCode).not.toBe(0)
+    expect(arbitraryResult.stdout).toContain("FAIL no GUI dependency")
+  })
+
   it("rejects future provider source while allowing GitHub provider source", async () => {
     // Given: a source fixture with both supported GitHub and unsupported future provider names.
     const fixtureRoot = await createFixtureRoot("incident-future-provider-scope-")

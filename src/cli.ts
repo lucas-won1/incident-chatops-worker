@@ -26,6 +26,7 @@ Commands:
   status     Print worker status.
   run-once   Run one worker cycle.
   logs       Print local audit logs.
+  mcp        Serve read-only incident handoff tools over MCP stdio.
   dev        Run development validation helpers.
 
 Options:
@@ -85,6 +86,11 @@ export const runCliAsync = async (
 
   if (args[0] === "run-once" && findOptionValue(args, "--source") === "sentry") {
     return runSentryOnce({ args: args.slice(1), findOptionValue })
+  }
+
+  if (args[0] === "mcp") {
+    const { runMcpCommand } = await import("./cli/mcp.js")
+    return runMcpCommand(args.slice(1))
   }
 
   if (args[0] === "dev") {

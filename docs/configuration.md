@@ -9,7 +9,7 @@
 - `repos.allowlist`와 `worktree.root`는 절대 경로여야 하며, `..` 경로나 NUL 문자를 포함할 수 없습니다.
 - Sentry polling 기본값은 `SENTRY_POLL_INTERVAL_SECONDS=300`입니다. `SENTRY_POLL_MIN_INTERVAL_SECONDS` 기본값은 `60`이고, polling interval은 min interval보다 작을 수 없습니다.
 - MR/PR provider는 GitLab과 GitHub를 지원합니다. `mr.provider`는 `gitlab` 또는 `github`만 지원합니다.
-- Generic runner의 `command`는 반드시 `runners.genericCommandAllowlist`에 들어 있어야 합니다.
+- `runners.provider`는 `codex`, `claude-code`, `generic` 중 하나입니다. generic runner의 `command`는 반드시 `runners.generic.commandAllowlist`에 들어 있어야 합니다.
 
 ## `.env` 키
 
@@ -66,14 +66,47 @@ slack:
     routing:
       frontend: "#frontend-incidents"
 runners:
-  genericCommandAllowlist:
-    - echo
-  definitions:
-    - id: echo-safe
-      type: generic
-      command: echo
-      args:
-        - incident-analysis-placeholder
+  provider: codex
+  projectEnv:
+    command: /Users/example/.local/bin/mise
+    args:
+      - exec
+      - --
+  codex:
+    home: /Users/example/.local/share/incident-chatops-worker/codex
+    bin: codex
+    profile: incident-worker
+    model: gpt-5-codex
+    outputRoot: /Users/example/.local/share/incident-chatops-worker/codex-output
+    workspaceWriteNetworkAccess: false
+    extraEnvAllowlist: []
+  claudeCode:
+    bin: claude
+    configDir: /Users/example/.local/share/incident-chatops-worker/claude
+    settingsPath: /Users/example/.local/share/incident-chatops-worker/claude/settings.json
+    model: claude-sonnet-4
+    permissionMode: acceptEdits
+    allowedTools:
+      - Read
+    disallowedTools:
+      - Bash(git push:*)
+    extraEnvAllowlist: []
+  generic:
+    analysisCommandId: echo-analysis
+    fixCommandId: echo-fix
+    commandAllowlist:
+      - echo
+    definitions:
+      - id: echo-analysis
+        type: generic
+        command: echo
+        args:
+          - incident-analysis-placeholder
+      - id: echo-fix
+        type: generic
+        command: echo
+        args:
+          - incident-fix-placeholder
 mr:
   provider: gitlab
   gitlab:
@@ -117,6 +150,7 @@ mr:
 - 최소 1개 이상의 절대 경로가 필요합니다.
 - 상대 경로, `..` traversal, NUL 문자는 거부됩니다.
 - incident fix 작업은 이 목록에 들어 있는 저장소에서만 worktree를 만들고 branch를 생성합니다.
+- `analysis_only`는 이 목록에 들어 있는 configured source repo path에서 직접 실행되며 worker git worktree를 만들지 않습니다. 분석 전과 후에 source repo가 clean이어야 합니다.
 - 예시: `/Users/example/work/service-repo`
 
 ## `worktree.root`
@@ -127,6 +161,32 @@ mr:
 - `..` traversal과 NUL 문자는 거부됩니다.
 - 운영 계정이 쓰기 권한을 가진 로컬 디렉터리여야 합니다.
 - 예시: `/Users/example/.local/share/incident-chatops-worker/worktrees`
+
+## `worktree.prepare`
+
+`worktree.prepare`는 runner 시작 전에 새 Git worktree에서 실행할 프로젝트 bootstrap 명령입니다. 새 worktree에는 `node_modules` 같은 ignored dependency directory가 없으므로, monorepo 검증이 필요한 프로젝트는 여기서 설치 또는 캐시 복원을 끝내야 합니다.
+
+이 설정은 `fix_and_mr`의 worker git worktree에서만 실행됩니다. `analysis_only`는 worker worktree를 만들지 않으므로 `worktree.prepare`를 실행하지 않습니다. 분석에 필요한 dependency layout은 source repo 자체가 이미 갖고 있어야 하며, source repo가 dirty이면 분석을 시작하지 않습니다.
+
+```yaml
+worktree:
+  root: /Users/example/.local/share/incident-chatops-worker/worktrees
+  prepare:
+    timeoutMs: 900000
+    commands:
+      - command: pnpm
+        args:
+          - install
+          - --frozen-lockfile
+          - --prefer-offline
+```
+
+| 필드 | 설명 |
+| --- | --- |
+| `commands` | runner 전에 순서대로 실행할 command 목록입니다. 각 항목은 `command`와 `args` argv 배열로만 표현합니다. |
+| `timeoutMs` | 각 준비 command의 timeout입니다. 기본값은 `600000`입니다. |
+
+`runners.projectEnv`가 있으면 준비 command에도 같은 wrapper가 적용됩니다. 예를 들어 위 `pnpm` command는 `mise exec -- pnpm install ...` 형태로 실행됩니다. command는 shell 없이 실행되며 shell interpreter와 command string은 거부됩니다.
 
 ## `branch.prefix`
 
@@ -146,28 +206,99 @@ mr:
 | `slack.channels.default` | 기본 Slack 채널입니다. `#incidents`처럼 채널명 형태여야 합니다. |
 | `slack.channels.routing` | 선택 필드입니다. key는 routing 이름이고 value는 Slack 채널입니다. 생략하면 `{}`로 처리됩니다. |
 
-## `runners.genericCommandAllowlist`
+## `runners.provider`
 
-`runners.genericCommandAllowlist`는 generic runner가 실행할 수 있는 command 목록입니다.
+`runners.provider`는 daemon 전체에서 사용할 runner provider를 고릅니다. 기본값은 `codex`입니다.
+
+- `codex`: Codex headless CLI adapter를 사용합니다.
+- `claude-code`: Claude Code headless CLI adapter를 사용합니다.
+- `generic`: YAML에 정의한 generic command adapter를 사용합니다.
+
+provider 선택은 daemon-global입니다. Slack action이나 Sentry 입력이 provider를 바꾸지 않습니다.
+
+## `runners.projectEnv`
+
+`runners.projectEnv`는 선택 필드입니다. 설정하면 선택된 runner 명령을 프로젝트 toolchain wrapper 안에서 실행합니다. worker가 `pnpm`, `node`, `turbo` 같은 도구를 직접 해석하지 않고, repository의 mise, direnv, nix, devbox 같은 환경 로더가 결정하게 하는 용도입니다.
+
+예를 들어 위 설정은 내부적으로 다음 형태가 됩니다.
+
+```bash
+/Users/example/.local/bin/mise exec -- codex exec --cd <workspace> ...
+```
+
+| 필드 | 설명 |
+| --- | --- |
+| `command` | 실행할 wrapper command입니다. 예: `/Users/example/.local/bin/mise`, `/opt/homebrew/bin/direnv`, `nix`, `devbox`. |
+| `args` | wrapper command 뒤, 실제 runner command 앞에 붙일 argv 목록입니다. 예: `["exec", "--"]`, `["exec", ".", "--"]`, `["develop", "--command"]`. |
+
+wrapper는 shell 없이 argv 배열로 실행됩니다. shell interpreter, shell command string, NUL byte, shell metacharacter, 위험한 override flag는 거부됩니다. `cwd`는 incident worktree/workspace로 유지됩니다.
+
+## `runners.codex`
+
+`runners.codex`는 Codex CLI invocation과 instance root를 설정합니다. Codex provider는 `codex exec`만 사용합니다.
+
+| 필드 | 설명 |
+| --- | --- |
+| `home` | 선택 필드입니다. 설정하면 child process의 `CODEX_HOME`이 됩니다. 이 값은 Codex config, auth, session이 들어가는 root입니다. |
+| `bin` | 선택 필드입니다. 실행할 Codex executable override입니다. 생략하면 `codex`를 실행합니다. |
+| `profile` | 선택 필드입니다. `codex exec --profile` invocation override입니다. `CODEX_HOME/profile/model/bin` 같은 경로 조합이 아닙니다. |
+| `model` | 선택 필드입니다. `codex exec --model` invocation override입니다. `CODEX_HOME` 아래 경로가 아닙니다. |
+| `outputRoot` | 선택 필드입니다. `--output-last-message` 파일을 둘 worker-owned 디렉터리입니다. |
+| `workspaceWriteNetworkAccess` | 선택 필드입니다. 기본값은 `false`입니다. `true`이면 Codex `workspace-write` sandbox에서 command network/listen access를 허용하는 `sandbox_workspace_write.network_access=true` override를 전달합니다. dev server smoke나 package fetch가 필요한 repo에서만 켭니다. |
+| `extraEnvAllowlist` | 선택 필드입니다. child process에 추가로 전달할 비밀이 아닌 env 이름입니다. `TOKEN`, `SECRET`, `PASSWORD`, `KEY`, `AUTH`, `COOKIE`, `CREDENTIAL` 성격의 이름은 거부됩니다. |
+
+`home`은 `CODEX_HOME` config/auth/session root입니다. `bin`, `profile`, `model`은 해당 CLI 실행을 조정하는 override일 뿐이며, `CODEX_HOME/profile/model/bin` 같은 path hierarchy를 뜻하지 않습니다.
+
+Codex runner 설정은 headless `codex exec` invocation만 고릅니다. Codex App 후속 작업은 YAML runner 설정이 아니라 SQLite handoff, MCP, repo-local `incident-handoff` plugin을 통해 시작합니다.
+
+## `runners.claudeCode`
+
+`runners.claudeCode`는 Claude Code headless CLI adapter 설정입니다. Claude Desktop 또는 GUI 앱 제어는 지원하지 않습니다.
+
+| 필드 | 설명 |
+| --- | --- |
+| `bin` | 선택 필드입니다. 실행할 Claude executable override입니다. 생략하면 `claude`를 실행합니다. |
+| `configDir` | 선택 필드입니다. child process의 `CLAUDE_CONFIG_DIR`로 전달되는 process config 디렉터리입니다. |
+| `settingsPath` | 선택 필드입니다. `claude --settings` invocation override입니다. |
+| `model` | 선택 필드입니다. `claude --model` invocation override입니다. |
+| `permissionMode` | 선택 필드입니다. 허용된 Claude Code permission mode입니다. 위험한 permission bypass 값은 거부됩니다. |
+| `allowedTools` | 선택 tool 목록입니다. `--allowedTools`로 전달됩니다. |
+| `disallowedTools` | 선택 tool 목록입니다. `--disallowedTools`로 전달됩니다. |
+| `extraEnvAllowlist` | 선택 필드입니다. child process에 추가로 전달할 비밀이 아닌 env 이름입니다. secret-looking 이름은 거부됩니다. |
+
+macOS에서는 `configDir`가 process config 파일 위치를 분리해도 Claude Code 로그인 credential이 Keychain에 저장되는 방식까지 별도 계정처럼 분리한다고 보장하지 않을 수 있습니다. 별도 로그인 credential 격리가 필요하면 운영 계정, OS user, 또는 Claude Code가 공식 지원하는 credential 분리 방식을 확인해야 합니다.
+
+## `runners.generic`
+
+`runners.generic`는 generic runner가 실행할 mode별 command id와 command 목록입니다.
+
+| 필드 | 설명 |
+| --- | --- |
+| `analysisCommandId` | `analysis_only`에서 사용할 `definitions[*].id`입니다. provider가 `generic`이면 필수입니다. |
+| `fixCommandId` | `fix_and_mr`에서 사용할 `definitions[*].id`입니다. provider가 `generic`이면 필수입니다. |
+| `commandAllowlist` | generic runner가 실행할 command 목록입니다. |
+| `definitions` | id, command, args로 구성된 generic runner 정의입니다. |
+
+`runners.generic.commandAllowlist`는 generic runner가 실행할 command 목록입니다.
 
 - 최소 1개 이상이 필요합니다.
 - command는 영문, 숫자, `.`, `_`, `/`, `-`만 사용할 수 있습니다.
 - `..`가 들어간 command는 거부됩니다.
-- `runners.definitions[*].command`는 이 목록의 멤버여야 합니다.
+- `runners.generic.definitions[*].command`는 이 목록의 멤버여야 합니다.
 - 안전한 예시로는 `echo`처럼 단일 executable 이름을 사용합니다.
 
-## `runners.definitions`
-
-`runners.definitions`는 worker가 사용할 runner 목록입니다. 최소 1개 이상이 필요합니다.
+`runners.generic.definitions`는 worker가 사용할 generic command 목록입니다. 최소 1개 이상이 필요합니다.
 
 | 필드 | 설명 |
 | --- | --- |
 | `id` | runner 식별자입니다. 영문자로 시작하고 영문, 숫자, `_`, `-`만 사용할 수 있습니다. |
 | `type` | 현재 YAML 예시는 `generic`만 사용합니다. |
-| `command` | 실행할 command입니다. 반드시 `runners.genericCommandAllowlist`에 포함되어야 합니다. |
+| `command` | 실행할 command입니다. 반드시 `runners.generic.commandAllowlist`에 포함되어야 합니다. |
 | `args` | 선택 인자 배열입니다. 생략하면 빈 배열로 처리됩니다. 각 항목은 빈 문자열일 수 없습니다. |
 
-위 예시의 `echo-safe` runner는 `command: echo`를 사용하고, `echo`가 `genericCommandAllowlist`에 있으므로 허용됩니다.
+위 예시의 `echo-analysis` runner는 `command: echo`를 사용하고, `echo`가 `runners.generic.commandAllowlist`에 있으므로 허용됩니다.
+
+Migration note: legacy `runners.genericCommandAllowlist`와 `runners.definitions`는 migration 동안 parseable하며 내부적으로 `runners.generic.commandAllowlist`와 `runners.generic.definitions`로 normalize됩니다. 새 문서와 예시는 provider별 block을 사용합니다.
 
 ## `mr.provider`
 
@@ -232,7 +363,8 @@ node dist/cli.js dev validate-docs
 - `SENTRY_POLL_INTERVAL_SECONDS`가 `SENTRY_POLL_MIN_INTERVAL_SECONDS`보다 작습니다.
 - `repos.allowlist`나 `worktree.root`가 절대 경로가 아닙니다.
 - `branch.prefix`가 `/`로 끝나지 않거나 `..`를 포함합니다.
-- `runners.definitions[*].command`가 `runners.genericCommandAllowlist`에 없습니다.
+- `runners.generic.definitions[*].command`가 `runners.generic.commandAllowlist`에 없습니다.
+- `runners.provider: generic`인데 `runners.generic.analysisCommandId` 또는 `runners.generic.fixCommandId`가 없습니다.
 - YAML에 secret 성격의 key나 credential 형태의 value가 들어 있습니다.
 - `mr.provider`가 `gitlab` 또는 `github`이 아닙니다.
 - selected provider가 `gitlab`인데 `GITLAB_TOKEN`이 없거나, selected provider가 `github`인데 `GITHUB_TOKEN`이 없습니다.

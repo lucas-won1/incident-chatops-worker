@@ -11,8 +11,9 @@ import {
 import { LastMessageProcess } from "./codex-test-fakes.js"
 
 const mainServiceEnv = {
-  CODEX_BIN: "codex",
-  CODEX_HOME: "/tmp/codex-home",
+  CODEX_BIN: "/ambient/codex",
+  CODEX_HOME: "/ambient/codex-home",
+  CODEX_THREAD_ID: "019f-live-app-thread",
   GITLAB_TOKEN: "main-service-gitlab-secret",
   HOME: "/tmp",
   PATH: "/usr/bin",
@@ -42,7 +43,7 @@ const request = {
   },
   mode: "analysis_only",
   repositoryConstraints: "analysis only",
-  worktreePath: "/tmp/worktree",
+  workspacePath: "/tmp/workspace",
 } as const
 
 class CleanChecker implements RunnerCleanChecker {
@@ -85,7 +86,6 @@ describe("runner secret env separation", () => {
 
     // Then: child env excludes service tokens and all returned output is redacted.
     expect(processRunner.invocations[0]?.env).toEqual({
-      CODEX_HOME: "/tmp/codex-home",
       HOME: "/tmp",
       PATH: "/usr/bin",
     })
@@ -93,6 +93,67 @@ describe("runner secret env separation", () => {
     expect(JSON.stringify(result)).not.toContain(mainServiceEnv.GITLAB_TOKEN)
     expect(JSON.stringify(result)).not.toContain(mainServiceEnv.SENTRY_AUTH_TOKEN)
     expect(JSON.stringify(result)).not.toContain(mainServiceEnv.SLACK_BOT_TOKEN)
+  })
+
+  it("uses configured Codex home without passing service tokens or ambient CODEX_HOME", async () => {
+    // Given: Codex has a worker-owned home and the ambient env contains service tokens.
+    const processRunner = new LastMessageProcess(
+      JSON.stringify({ analysis: `analysis ${mainServiceEnv.GITLAB_TOKEN}` }),
+      {
+        exitCode: 0,
+        stderr: `stderr ${mainServiceEnv.SLACK_BOT_TOKEN}`,
+        stdout: `stdout ${mainServiceEnv.SENTRY_AUTH_TOKEN}`,
+      },
+    )
+    const runner = new CodexExecRunner({
+      cleanChecker: new CleanChecker(),
+      env: mainServiceEnv,
+      home: "/var/lib/incident-worker/codex",
+      processRunner,
+      secretEnvNames: mainServiceSecretNames,
+    })
+
+    // When: the Codex runner executes with configured instance isolation.
+    const result = await runner.run(request)
+
+    // Then: CODEX_HOME is overridden and service token values remain redacted.
+    expect(processRunner.invocations[0]?.env).toEqual({
+      CODEX_HOME: "/var/lib/incident-worker/codex",
+      HOME: "/tmp",
+      PATH: "/usr/bin",
+    })
+    expect(JSON.stringify(result)).toContain("[REDACTED]")
+    expect(JSON.stringify(result)).not.toContain(mainServiceEnv.CODEX_HOME)
+    expect(JSON.stringify(result)).not.toContain(mainServiceEnv.GITLAB_TOKEN)
+    expect(JSON.stringify(result)).not.toContain(mainServiceEnv.SENTRY_AUTH_TOKEN)
+    expect(JSON.stringify(result)).not.toContain(mainServiceEnv.SLACK_BOT_TOKEN)
+  })
+
+  it("ignores ambient Codex process variables unless they are explicitly configured", async () => {
+    // Given: the daemon inherited a live Codex app environment from the terminal.
+    const processRunner = new LastMessageProcess(JSON.stringify({ analysis: "analysis" }))
+    const runner = new CodexExecRunner({
+      cleanChecker: new CleanChecker(),
+      env: {
+        CODEX_BIN: "/ambient/codex",
+        CODEX_HOME: "/ambient/codex-home",
+        CODEX_SESSION_ID: "ambient-session",
+        CODEX_THREAD_ID: "019f-live-app-thread",
+        HOME: "/tmp",
+        PATH: "/usr/bin",
+      },
+      processRunner,
+    })
+
+    // When: the Codex runner starts its isolated CLI process.
+    await runner.run(request)
+
+    // Then: ambient Codex env does not choose the binary or leak into the child env.
+    expect(processRunner.invocations[0]?.command).toBe("codex")
+    expect(processRunner.invocations[0]?.env).toEqual({
+      HOME: "/tmp",
+      PATH: "/usr/bin",
+    })
   })
 
   it("keeps main service tokens out of generic child env while still redacting their values", async () => {
@@ -116,7 +177,6 @@ describe("runner secret env separation", () => {
 
     // Then: child env excludes service tokens and returned output is still redacted.
     expect(processRunner.invocations[0]?.env).toEqual({
-      CODEX_HOME: "/tmp/codex-home",
       HOME: "/tmp",
       PATH: "/usr/bin",
     })
@@ -179,7 +239,6 @@ describe("runner secret env separation", () => {
 
     // Then: child env excludes service tokens while stdout, stderr, and analysis are redacted.
     expect(processRunner.invocations[0]?.env).toEqual({
-      CODEX_HOME: "/tmp/codex-home",
       HOME: "/tmp",
       PATH: "/usr/bin",
     })

@@ -176,8 +176,8 @@ node dist/cli.js doctor --env-file .env --config incident-worker.config.yaml
 
 ### dirty repo 또는 dirty worktree
 
-- 증상: `repository must be clean before opening a worktree`, `worktree is dirty: ...`, 또는 `analysis-only runner left dirty worktree ...`가 출력됩니다.
-- 원인: 원본 repo에 미정리 변경이 있거나, runner가 `analysis_only` 모드에서 파일을 변경했습니다.
+- 증상: `repository must be clean before opening a worktree`, `worktree is dirty: ...`, 또는 `analysis-only runner left dirty workspace ...`가 출력됩니다.
+- 원인: 원본 repo에 미정리 변경이 있거나, runner가 `analysis_only` 모드에서 파일을 변경했습니다. `analysis_only`는 worker worktree를 만들지 않고 configured source repo path에서 직접 실행되므로 source repo clean 상태가 필수입니다. `analysis-only runner left dirty workspace` 오류는 `Dirty status:` 아래에 `git status --porcelain=v1 --untracked-files=all` 결과를 함께 출력합니다.
 - 확인:
 
 ```bash
@@ -188,26 +188,54 @@ git status --porcelain=v1
 node dist/cli.js logs --db <state-db-path>
 ```
 
-- 해결: 운영자가 의도한 변경을 먼저 정리한 뒤 다시 승인합니다. `analysis_only`는 no-write 모드이므로 수정이 필요한 경우 Slack에서 fix 흐름을 승인해야 합니다.
+- 해결: 운영자가 의도한 변경을 먼저 정리한 뒤 다시 승인합니다. `analysis_only`는 no-write 모드이고 `worktree.prepare`, branch 생성, push, MR/PR 생성을 실행하지 않으므로, 수정이 필요한 경우 Slack에서 fix 흐름을 승인해야 합니다.
+
+### 분석에서 dependency layout이 없음
+
+- 증상: `analysis_only` runner가 `node_modules` 또는 project toolchain을 찾지 못하지만 `worktree.prepare` 로그가 없습니다.
+- 원인: `analysis_only`는 source repo에서 읽기 전용으로 실행되고 worker git worktree를 만들지 않습니다. 따라서 `worktree.prepare.commands`도 실행되지 않습니다.
+- 확인:
+
+```bash
+git -C <source-repo-path> status --porcelain=v1
+```
+
+```bash
+node dist/cli.js logs --db <state-db-path>
+```
+
+- 해결: source repo 자체의 dependency layout을 운영자가 준비한 뒤 분석을 다시 승인합니다. dependency bootstrap을 worker가 대신 수행해야 하는 흐름은 `fix_and_mr`에서 `worktree.prepare.commands`와 `runners.projectEnv`로 구성합니다.
 
 ## runner
 
 ### unallowlisted runner command
 
 - 증상: `runner command ... is not configured` 또는 `command ... is outside generic command allowlist`가 출력됩니다.
-- 원인: Slack action이 요청한 runner id가 `runners.definitions`에 없거나, generic runner의 executable이 `runners.genericCommandAllowlist`에 없습니다.
+- 원인: `runners.provider: generic` 설정에서 mode command id가 `runners.generic.definitions`에 없거나, generic runner의 executable이 `runners.generic.commandAllowlist`에 없습니다.
 - 확인:
 
 ```bash
 node dist/cli.js doctor --env-file .env --config incident-worker.config.yaml
 ```
 
-- 해결: 사용할 runner를 `runners.definitions`에 명시하고, generic command executable을 `runners.genericCommandAllowlist`에 추가합니다. shell interpreter나 broad wrapper는 허용하지 않습니다.
+- 해결: 사용할 command를 `runners.generic.definitions`에 명시하고, generic command executable을 `runners.generic.commandAllowlist`에 추가합니다. `analysis_only`와 `fix_and_mr`에 사용할 id는 `runners.generic.analysisCommandId`와 `runners.generic.fixCommandId`에 둡니다. shell interpreter나 broad wrapper는 허용하지 않습니다.
+
+### runner provider instance confusion
+
+- 증상: `doctor`가 예상과 다른 `Runner provider`를 출력하거나, Codex/Claude Code가 다른 계정/설정으로 실행되는 것처럼 보입니다.
+- 원인: `runners.provider`와 provider별 block이 일치하지 않거나, Codex/Claude Code credential 저장소가 기대와 다릅니다.
+- 확인:
+
+```bash
+node dist/cli.js doctor --env-file .env --config incident-worker.config.yaml
+```
+
+- 해결: Codex는 `runners.codex.home`을 `CODEX_HOME` config/auth/session root로 설정합니다. `runners.codex.bin`, `profile`, `model`은 invocation override이며 `CODEX_HOME/profile/model/bin` 경로가 아닙니다. Claude Code는 `runners.claudeCode.configDir`로 process config를 분리할 수 있지만, macOS Keychain login credential 저장소까지 항상 분리된다고 보장하지는 않습니다.
 
 ### analysis-only mutation denial
 
-- 증상: `analysis_only mode denies commit, push, and MR commands` 또는 `analysis-only runner left dirty worktree ...`가 출력됩니다.
-- 원인: 분석 전용 승인에서 commit, push, MR 생성, 파일 변경 같은 mutation을 시도했습니다.
+- 증상: `analysis_only mode denies commit, push, and MR commands` 또는 `analysis-only runner left dirty workspace ...`가 출력됩니다.
+- 원인: 분석 전용 승인에서 commit, push, MR 생성, 파일 변경 같은 mutation을 시도했습니다. dirty workspace 오류에는 변경된 파일 목록이 `Dirty status:`로 같이 표시됩니다.
 - 확인:
 
 ```bash
@@ -216,17 +244,17 @@ node dist/cli.js logs --db <state-db-path>
 
 - 해결: 분석 단계에서는 읽기 전용 조사만 수행합니다. 변경이 필요하면 Slack thread의 fix 버튼으로 `fix_and_mr` 흐름을 승인합니다.
 
-### malformed runner output 또는 stale Codex output
+### malformed runner output 또는 stale Codex/Claude Code output
 
-- 증상: `RunnerOutputParseError`, `Codex output-last-message JSON is missing`, `Codex output-last-message JSON is invalid`, 또는 `Codex output-last-message JSON could not be read`가 출력됩니다.
-- 원인: Codex runner가 `--output-last-message` 파일에 현재 실행의 JSON을 쓰지 않았거나, mode별 schema와 맞지 않는 JSON을 썼습니다. 테스트는 stale output 재사용도 실패로 처리합니다.
+- 증상: `RunnerOutputParseError`, `Codex output-last-message JSON is missing`, `Codex output-last-message JSON is invalid`, `Codex output-last-message JSON could not be read`, 또는 Claude Code JSON schema mismatch 오류가 출력됩니다.
+- 원인: Codex runner가 `--output-last-message` 파일에 현재 실행의 JSON을 쓰지 않았거나, Claude Code stdout JSON이 mode별 schema와 맞지 않습니다. 테스트는 stale output 재사용도 실패로 처리합니다.
 - 확인:
 
 ```bash
 node dist/cli.js logs --db <state-db-path>
 ```
 
-- 해결: runner adapter가 현재 실행의 마지막 메시지를 mode별 계약에 맞게 쓰는지 확인합니다. `analysis_only`는 `analysis`가 필요하고, `fix_and_mr`는 `analysis`, `branchInfo`, `changesSummary`, `mrReadiness`, `verificationResults`가 필요합니다.
+- 해결: runner adapter가 현재 실행의 마지막 메시지를 mode별 계약에 맞게 쓰는지 확인합니다. `analysis_only`는 `analysis`가 필요하고, `fix_and_mr`는 `analysis`, `branchInfo`, `changesSummary`, `mrReadiness`, `verificationResults`, `mergeRequestBody`가 필요합니다.
 
 ### runner process timeout 또는 non-zero exit
 
@@ -246,13 +274,31 @@ node dist/cli.js logs --db <state-db-path>
 
 - 증상: Slack thread에 `verification failed`가 표시되고 Git push 또는 MR/PR 생성이 일어나지 않습니다.
 - 원인: `fix_and_mr` runner 결과의 `verificationResults`가 통과로 해석되지 않았습니다.
+- 추가 원인: 새 Git worktree에는 source repo의 ignored `node_modules`가 없어서 `pnpm validate:changed`, `turbo`, `jest`, `next` 같은 검증 command가 dependency layout을 찾지 못할 수 있습니다.
+- 추가 원인: Codex `workspace-write` sandbox에서 command network/listen access가 꺼져 있으면 dev server smoke가 `listen EPERM 0.0.0.0:<port>`로 실패할 수 있습니다.
 - 확인:
 
 ```bash
 node dist/cli.js logs --db <state-db-path>
 ```
 
-- 해결: runner가 실패한 검증을 먼저 고친 뒤 다시 fix를 승인합니다. 현재 workflow는 verification summary를 저장한 뒤 push 전에 `WorkflowVerificationFailedError`로 중단합니다.
+- 해결: 코드 검증 자체가 실패한 경우 runner가 실패 원인을 고친 뒤 다시 fix를 승인합니다. dependency layout이 없어서 실패한 경우 `worktree.prepare.commands`에 `pnpm install --frozen-lockfile --prefer-offline` 같은 project bootstrap을 설정합니다. dev server smoke가 필요하면 `runners.codex.workspaceWriteNetworkAccess: true`를 설정합니다. 현재 workflow는 verification summary를 저장한 뒤 push 전에 `WorkflowVerificationFailedError`로 중단합니다.
+
+### worktree prepare dependency layout 실패
+
+- 증상: fix 승인 후 runner가 시작되지 않고 `worktree prepare failed` 또는 `worktree prepare command failed ...`가 audit/log에 남습니다.
+- 원인: 새 worker git worktree에는 source repo의 ignored dependency directory가 없고, 준비 command가 실패했습니다. `runners.projectEnv`를 쓰는 경우 wrapper 경로나 args가 실제 worktree cwd에서 project toolchain을 열지 못했을 수도 있습니다.
+- 확인:
+
+```bash
+node dist/cli.js logs --db <state-db-path>
+```
+
+```bash
+git -C <source-repo-path> status --porcelain=v1
+```
+
+- 해결: `worktree.prepare.commands`에 shell string이 아니라 argv 배열로 bootstrap command를 넣고, 필요하면 `runners.projectEnv`를 `mise exec --`, `direnv exec . --`, `nix develop --command`, `devbox run --` 같은 wrapper로 맞춥니다. source repo가 dirty이면 fix worktree 생성 전부터 실패할 수 있으므로 먼저 정리합니다.
 
 ### `MR creation failed after push`
 
@@ -284,6 +330,40 @@ node dist/cli.js logs --db <state-db-path>
 ```
 
 - 해결: `STATE_DB_PATH`를 설정했다면 그 경로가 쓰기 가능한 로컬 경로인지 확인합니다. 생략했다면 OS별 automatic durable state path의 parent directory를 확인합니다. 처음 실행이면 `daemon`, `daemon --once`, `run-once`처럼 write path를 한 번 실행해 DB와 migration을 만들고, 그 다음 `status`와 `logs`를 확인합니다.
+
+### MCP에서 handoff DB를 찾지 못함
+
+- 증상: `node dist/cli.js mcp --db <state.sqlite>`가 `SQLite database does not exist` 또는 `StateStoreOpenError`를 출력합니다.
+- 원인: MCP는 token-light/read-only surface라서 Slack/Sentry/Git provider token을 읽지 않습니다. 실패 원인은 대개 `--db`, `STATE_DB_PATH`, automatic DB path가 실제 daemon이 쓰는 SQLite 파일과 다르거나 아직 write path가 DB를 만들지 않은 것입니다.
+- 확인:
+
+```bash
+node dist/cli.js status --env-file .env --config incident-worker.config.yaml
+```
+
+```bash
+node dist/cli.js logs --env-file .env --config incident-worker.config.yaml
+```
+
+```bash
+node dist/cli.js mcp --db <state.sqlite>
+```
+
+- 해결: daemon/status/logs가 resolve하는 DB와 MCP의 `--db` 또는 `STATE_DB_PATH`가 같은지 맞춥니다. 운영 DB가 아직 없다면 `daemon --once` 또는 `run-once` 같은 write path를 먼저 실행합니다. MCP는 daemon, polling, runner, MR/PR 생성을 시작하지 않으므로 handoff가 없으면 먼저 fix flow가 MR/PR을 만들어야 합니다.
+
+### Codex App follow-up을 잘못된 worktree에서 시작함
+
+- 증상: `$incident <issue-id>` 후속 작업이 default branch에서 시작되거나, worker-created worktree folder를 열었거나, unrelated App worktree라는 경고가 나옵니다.
+- 원인: 후속 App 작업은 Local project에서 repo-local `incident-handoff` plugin으로 시작해야 합니다. plugin은 MCP handoff의 `sourceBranch`를 기준으로 Codex App-managed worktree를 만들며, worker-created worktree folder나 default branch를 follow-up target으로 쓰지 않습니다.
+- 확인:
+
+```bash
+git status --short --branch
+git rev-parse HEAD
+git merge-base --is-ancestor <headSha> HEAD
+```
+
+- 해결: unrelated App worktree라면 작업을 멈추고 Local project에서 `$incident <issue-id>`를 다시 실행합니다. 같은 incident App worktree라고 판단하려면 public git state로 현재 `HEAD`가 handoff `headSha`와 같거나, `headSha`가 현재 `HEAD`의 ancestor이고 branch/upstream/ref가 handoff `sourceBranch`와 충돌하지 않아야 합니다.
 
 ### audit/log inspection
 

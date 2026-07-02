@@ -62,7 +62,7 @@ describe("incident workflow concurrency and recovery", () => {
     // Then: only the original action performs side effects and the duplicate gets status.
     expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"])
     expect(runner.calls).toHaveLength(1)
-    expect(repo.openRequests).toHaveLength(1)
+    expect(repo.openRequests).toHaveLength(0)
     expect(store.listAuditEntries().filter((entry) => entry.action === "job.claimed")).toHaveLength(
       1,
     )
@@ -70,7 +70,7 @@ describe("incident workflow concurrency and recovery", () => {
       slack.messages.filter((message) => JSON.stringify(message.blocks).includes("Root cause")),
     ).toHaveLength(1)
     expect(
-      slack.messages.filter((message) => message.text.includes("already in progress")),
+      slack.messages.filter((message) => message.text.includes("이미 진행 중인 작업입니다")),
     ).toHaveLength(1)
     store.close()
   })
@@ -95,11 +95,13 @@ describe("incident workflow concurrency and recovery", () => {
     // Then: the stale action is handled safely without second runner, push, or MR side effects.
     expect(staleFixResult.map((result) => result.status)).toEqual(["fulfilled"])
     expect(runner.calls).toHaveLength(1)
-    expect(repo.openRequests).toHaveLength(1)
+    expect(repo.openRequests).toHaveLength(0)
     expect(repo.pushRequests).toHaveLength(0)
     expect(mrProvider.calls).toHaveLength(0)
     expect(
-      slack.messages.filter((message) => message.text.includes("already in progress")),
+      slack.messages.filter((message) =>
+        message.text.includes("이미 이 incident의 작업이 진행 중입니다"),
+      ),
     ).toHaveLength(1)
     expect(store.listAuditEntries().map((entry) => entry.action)).toContain("job.rejected_active")
     store.close()
@@ -142,22 +144,26 @@ describe("incident workflow concurrency and recovery", () => {
     expect(auditDetails).toContain("mr_failed_after_push")
     expect(auditDetails).toContain("incident/SENTRY-10")
     expect(auditDetails).not.toContain("glpat-secret")
-    expect(JSON.stringify(slack.messages.at(-1)?.blocks)).toContain("MR creation failed after push")
+    expect(JSON.stringify(slack.messages.at(-1)?.blocks)).toContain(
+      "브랜치 push 이후 MR 생성에 실패했습니다",
+    )
     store.close()
   })
 
   it("records cleanup failure without hiding the completed job result", async () => {
-    // Given: a successful analysis whose cleanup will fail.
-    const runner = new RecordingRunner([runnerResult({ mode: "analysis_only" })])
+    // Given: a successful fix whose cleanup will fail after MR creation.
+    const runner = new RecordingRunner([runnerResult({ mode: "fix_and_mr" })])
     const { repo, slack, store, workflow } = createWorkflow(runner)
     repo.cleanupFails = true
     await workflow.handleDetectedIncident(detectedIncident)
 
-    // When: Slack approves analysis.
-    await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
+    // When: Slack approves fix.
+    await workflow.handleSlackAction(slackAction("fix_requested", SlackActionIds.fixAndMr))
 
-    // Then: the summary is still posted and cleanup failure is audited separately.
-    expect(JSON.stringify(slack.messages.at(-1)?.blocks)).toContain("Root cause")
+    // Then: the MR result is still posted and cleanup failure is audited separately.
+    expect(JSON.stringify(slack.messages.at(-1)?.blocks)).toContain(
+      "https://gitlab.example/incidents/merge_requests/7",
+    )
     expect(store.listAuditEntries().map((entry) => entry.action)).toContain("cleanup_failed")
     store.close()
   })
@@ -191,16 +197,16 @@ describe("incident workflow concurrency and recovery", () => {
   })
 
   it("posts safe errors and writes audit rows when workflow execution fails", async () => {
-    // Given: opening a worktree fails with a sensitive message.
-    const runner = new RecordingRunner([runnerResult({ mode: "analysis_only" })])
+    // Given: opening a fix worktree fails with a sensitive message.
+    const runner = new RecordingRunner([runnerResult({ mode: "fix_and_mr" })])
     const { repo, slack, store, workflow } = createWorkflow(runner)
     repo.openWorktree = async () => {
       throw new Error("boom xoxb-secret-token")
     }
     await workflow.handleDetectedIncident(detectedIncident)
 
-    // When: Slack approves analysis.
-    await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
+    // When: Slack approves fix.
+    await workflow.handleSlackAction(slackAction("fix_requested", SlackActionIds.fixAndMr))
 
     // Then: Slack and audit output are redacted and no runner spawned.
     expect(runner.calls).toHaveLength(0)

@@ -120,20 +120,39 @@ export const createGitHubPullRequestProvider = (
         throw new GitHubPullRequestApiError(kind, createResponse.status, "create")
       }
 
-      try {
-        const body = await createResponse.json()
-        const parsed = gitHubPullRequestResponseSchema.parse(body)
-        options.audit?.({
-          action: "merge_request.create.succeeded",
-          provider: "github",
-          repository,
-          stage: "create",
-          statusCode: createResponse.status,
-          url: parsed.html_url,
-        })
+      const parsed = await (async () => {
+        try {
+          const body = await createResponse.json()
+          return gitHubPullRequestResponseSchema.parse(body)
+        } catch (error) {
+          if (error instanceof ZodError || error instanceof SyntaxError) {
+            options.audit?.({
+              action: "merge_request.create.failed",
+              kind: "parse",
+              provider: "github",
+              repository,
+              stage: "create",
+              statusCode: createResponse.status,
+            })
+            throw new GitHubPullRequestParseError(createResponse.status)
+          }
+          throw error
+        }
+      })()
 
-        if (input.labels.length > 0) {
-          const labelsResponse = await client.post(
+      options.audit?.({
+        action: "merge_request.create.succeeded",
+        provider: "github",
+        repository,
+        stage: "create",
+        statusCode: createResponse.status,
+        url: parsed.html_url,
+      })
+
+      if (input.labels.length > 0) {
+        let labelsResponse: Response
+        try {
+          labelsResponse = await client.post(
             `repos/${options.owner}/${options.repo}/issues/${parsed.number}/labels`,
             {
               json: {
@@ -141,42 +160,42 @@ export const createGitHubPullRequestProvider = (
               },
             },
           )
-          if (!labelsResponse.ok) {
-            const kind = gitLabErrorKindForStatus(labelsResponse.status)
-            options.audit?.({
-              action: "merge_request.labels.failed",
-              kind,
-              provider: "github",
-              repository,
-              stage: "labels",
-              statusCode: labelsResponse.status,
-            })
-            throw new GitHubPullRequestApiError(kind, labelsResponse.status, "labels")
-          }
+        } catch (error) {
+          const statusCode =
+            error instanceof GitHubPullRequestApiError ? error.statusCode : undefined
           options.audit?.({
-            action: "merge_request.labels.succeeded",
+            action: "merge_request.labels.failed",
+            kind: "transport",
+            provider: "github",
+            repository,
+            stage: "labels",
+            statusCode,
+          })
+          return { url: parsed.html_url }
+        }
+
+        if (!labelsResponse.ok) {
+          const kind = gitLabErrorKindForStatus(labelsResponse.status)
+          options.audit?.({
+            action: "merge_request.labels.failed",
+            kind,
             provider: "github",
             repository,
             stage: "labels",
             statusCode: labelsResponse.status,
           })
+          return { url: parsed.html_url }
         }
-
-        return { url: parsed.html_url }
-      } catch (error) {
-        if (error instanceof ZodError || error instanceof SyntaxError) {
-          options.audit?.({
-            action: "merge_request.create.failed",
-            kind: "parse",
-            provider: "github",
-            repository,
-            stage: "create",
-            statusCode: createResponse.status,
-          })
-          throw new GitHubPullRequestParseError(createResponse.status)
-        }
-        throw error
+        options.audit?.({
+          action: "merge_request.labels.succeeded",
+          provider: "github",
+          repository,
+          stage: "labels",
+          statusCode: labelsResponse.status,
+        })
       }
+
+      return { url: parsed.html_url }
     },
   }
 }

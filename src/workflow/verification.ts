@@ -2,6 +2,7 @@ import type { RunnerResult } from "../runner/types.js"
 import { assertNever } from "../shared/assert-never.js"
 import type { VerificationStatus } from "../state/types.js"
 import { WorkflowVerificationFailedError } from "./errors.js"
+import type { WorkflowJobContext, WorkflowStateStore } from "./types.js"
 
 export type WorkflowVerificationSummary = {
   readonly status: VerificationStatus
@@ -33,4 +34,21 @@ export const ensureWorkflowVerificationPassed = (result: RunnerResult): void => 
     default:
       assertNever(summary.status)
   }
+}
+
+export const saveWorkflowVerificationSummary = (input: {
+  readonly context: WorkflowJobContext
+  readonly createdAt: string
+  readonly result: RunnerResult
+  readonly state: WorkflowStateStore
+}): WorkflowVerificationSummary => {
+  const summary = workflowVerificationSummary(input.result)
+  input.state.saveVerificationSummary({
+    createdAt: input.createdAt,
+    incidentId: input.context.incident.incidentId,
+    jobId: input.context.job.jobId,
+    status: summary.status,
+    summaryMarkdown: summary.summaryMarkdown,
+  })
+  return summary
 }

@@ -195,7 +195,7 @@ describe("GitHub pull request provider", () => {
     ])
   })
 
-  it("treats label non-2xx responses as fatal and rejects after the PR is created", async () => {
+  it("returns the created PR URL and audits label failures when labels fail after creation", async () => {
     // Given: GitHub creates the PR but rejects label application.
     const server = await startGitHubServer([
       createSuccessResponse(9),
@@ -205,14 +205,11 @@ describe("GitHub pull request provider", () => {
     const auditEvents: MergeRequestAuditEvent[] = []
     const provider = createProvider(server, auditEvents)
 
-    // When / Then: label failure rejects instead of returning the created PR URL.
-    await expect(
-      provider.createMergeRequest(createInput({ labels: ["missing-label"] })),
-    ).rejects.toMatchObject({
-      kind: "unexpected",
-      name: "GitHubPullRequestApiError",
-      statusCode: 422,
-    })
+    // When: the provider creates a PR but cannot apply labels.
+    const result = await provider.createMergeRequest(createInput({ labels: ["missing-label"] }))
+
+    // Then: label failure is non-fatal so the workflow can persist the PR URL.
+    expect(result.url).toBe("https://github.example/acme/shop/pull/9")
     expect(auditEvents).toEqual([
       expect.objectContaining({ action: "merge_request.create.requested" }),
       expect.objectContaining({
@@ -230,6 +227,38 @@ describe("GitHub pull request provider", () => {
         statusCode: 422,
       }),
     ])
+  })
+
+  it("returns the created PR URL and audits label transport failures when labels fail after creation", async () => {
+    // Given: GitHub creates the PR but the labels request loses transport after creation.
+    const server = await startGitHubServer([createSuccessResponse(11)])
+    servers.push(server)
+    const auditEvents: MergeRequestAuditEvent[] = []
+    const provider = createGitHubPullRequestProvider({
+      audit: (event) => {
+        auditEvents.push(event)
+        if (event.action === "merge_request.create.succeeded") {
+          servers.pop()
+          void server.close()
+        }
+      },
+      baseUrl: server.baseUrl,
+      owner: "acme",
+      repo: "shop",
+      token: "github_pat_secret_example",
+    })
+
+    // When: the provider creates a PR but cannot reach the labels API.
+    const result = await provider.createMergeRequest(createInput({ labels: ["incident"] }))
+
+    // Then: label transport failure is non-fatal so the workflow can persist the PR URL.
+    expect(result.url).toBe("https://github.example/acme/shop/pull/11")
+    expect(auditEvents.at(-1)).toMatchObject({
+      action: "merge_request.labels.failed",
+      kind: "transport",
+      statusCode: undefined,
+    })
+    expectSafeAudit(auditEvents)
   })
 
   it.each([

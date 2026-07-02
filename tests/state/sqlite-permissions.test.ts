@@ -53,4 +53,23 @@ describe("SQLite state file permissions", () => {
     // Then: the file mode is repaired to owner-only.
     expect(fileMode(dbPath)).toBe(0o600)
   })
+
+  it("leaves an existing database file mode unchanged when opened read-only", () => {
+    // Given: an existing readable database file with a non-owner-only mode.
+    const dbPath = createTempDbPath()
+    const created = openSqliteStateStore({ path: dbPath })
+    created.close()
+    chmodSync(dbPath, 0o644)
+
+    // When: the state store opens the existing file in read mode.
+    const readOnly = openSqliteStateStore({
+      accessMode: "read",
+      createIfMissing: false,
+      path: dbPath,
+    })
+    readOnly.close()
+
+    // Then: read-mode open does not repair or otherwise mutate the file mode.
+    expect(fileMode(dbPath)).toBe(0o644)
+  })
 })

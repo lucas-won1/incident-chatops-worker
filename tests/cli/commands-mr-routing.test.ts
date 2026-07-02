@@ -6,6 +6,7 @@ import type {
   CreateMergeRequestResult,
   MergeRequestProviderId,
 } from "../../src/mr/types.js"
+import { readSavedMrLinks } from "../workflow/incident-workflow-db-support.js"
 import {
   RecordingMergeRequestProvider,
   RecordingRepoAdapter,
@@ -18,10 +19,9 @@ import {
   configuredGitLabBaseUrl,
   createWorkflowTempDir,
   loadRoutingSettings,
-  readSavedMrLinks,
   routingDetectedIncident,
   routingFixAndMrAction,
-} from "../workflow/incident-workflow-support.js"
+} from "../workflow/incident-workflow-routing-support.js"
 
 type CapturedGitLabRoute = {
   readonly baseUrl: string

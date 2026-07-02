@@ -50,7 +50,7 @@ const genericRequest = (
   incidentContext,
   mode,
   repositoryConstraints: "analysis only",
-  worktreePath: "/tmp/worktree",
+  workspacePath: "/tmp/workspace",
 })
 
 describe("generic command runner", () => {
@@ -67,6 +67,133 @@ describe("generic command runner", () => {
 
     // When / Then: analysis-only mode denies mutation before process spawn.
     await expect(runner.run(genericRequest("git-push"))).rejects.toThrow(RunnerPolicyError)
+  })
+
+  it("rejects fix-mode git push before spawning", async () => {
+    // Given: a generic fix command definition tries to perform workflow-owned branch push.
+    const processRunner = new RecordingProcess()
+    const runner = new GenericCommandRunner({
+      cleanChecker: new FixedCleanChecker(true),
+      definitions: [
+        { args: ["push", "origin", "HEAD"], command: "git", id: "git-push", type: "generic" },
+      ],
+      genericCommandAllowlist: ["git"],
+      processRunner,
+    })
+
+    // When / Then: fix mode denies direct git push before process spawn.
+    await expect(runner.run(genericRequest("git-push", "fix_and_mr"))).rejects.toThrow(
+      RunnerPolicyError,
+    )
+    expect(processRunner.invocations).toEqual([])
+  })
+
+  it("rejects fix-mode git alias push config before spawning", async () => {
+    // Given: a generic fix command hides workflow-owned push behind a git alias.
+    const processRunner = new RecordingProcess()
+    const runner = new GenericCommandRunner({
+      cleanChecker: new FixedCleanChecker(true),
+      definitions: [
+        {
+          args: ["-c", "alias.publish=push", "publish", "origin", "HEAD"],
+          command: "git",
+          id: "git-alias-push",
+          type: "generic",
+        },
+      ],
+      genericCommandAllowlist: ["git"],
+      processRunner,
+    })
+
+    // When / Then: fix mode denies alias-backed git before process spawn.
+    await expect(runner.run(genericRequest("git-alias-push", "fix_and_mr"))).rejects.toThrow(
+      RunnerPolicyError,
+    )
+    expect(processRunner.invocations).toEqual([])
+  })
+
+  it("rejects otherwise read-looking generic git command before spawning", async () => {
+    // Given: a generic command appears read-only but uses the workflow-owned git executable.
+    const processRunner = new RecordingProcess()
+    const runner = new GenericCommandRunner({
+      cleanChecker: new FixedCleanChecker(true),
+      definitions: [{ args: ["status"], command: "git", id: "git-status", type: "generic" }],
+      genericCommandAllowlist: ["git"],
+      processRunner,
+    })
+
+    // When / Then: generic git is denied fail-closed before process spawn.
+    await expect(runner.run(genericRequest("git-status", "fix_and_mr"))).rejects.toThrow(
+      RunnerPolicyError,
+    )
+    expect(processRunner.invocations).toEqual([])
+  })
+
+  it.each([
+    ["gh pr", "gh", ["pr", "create"]],
+    ["glab mr", "glab", ["mr", "create"]],
+  ] as const)(
+    "rejects fix-mode provider command %s before spawning",
+    async (_label, command, args) => {
+      // Given: a generic fix command definition tries to create the provider-owned PR/MR.
+      const processRunner = new RecordingProcess()
+      const runner = new GenericCommandRunner({
+        cleanChecker: new FixedCleanChecker(true),
+        definitions: [{ args, command, id: "provider-review", type: "generic" }],
+        genericCommandAllowlist: [command],
+        processRunner,
+      })
+
+      // When / Then: fix mode denies direct PR/MR creation before process spawn.
+      await expect(runner.run(genericRequest("provider-review", "fix_and_mr"))).rejects.toThrow(
+        RunnerPolicyError,
+      )
+      expect(processRunner.invocations).toEqual([])
+    },
+  )
+
+  it.each([
+    ["gh api", "gh", ["api", "repos/o/r/pulls"]],
+    ["glab api", "glab", ["api", "projects/1/merge_requests"]],
+  ] as const)(
+    "rejects fix-mode provider CLI executable %s before spawning",
+    async (_label, command, args) => {
+      // Given: a provider CLI command reaches mutation-capable API routes without pr/mr verbs.
+      const processRunner = new RecordingProcess()
+      const runner = new GenericCommandRunner({
+        cleanChecker: new FixedCleanChecker(true),
+        definitions: [{ args, command, id: "provider-api", type: "generic" }],
+        genericCommandAllowlist: [command],
+        processRunner,
+      })
+
+      // When / Then: generic provider CLIs are denied before process spawn.
+      await expect(runner.run(genericRequest("provider-api", "fix_and_mr"))).rejects.toThrow(
+        RunnerPolicyError,
+      )
+      expect(processRunner.invocations).toEqual([])
+    },
+  )
+
+  it("allows safe generic fix commands", async () => {
+    // Given: a generic fix command uses an allowlisted package-manager executable.
+    const processRunner = new RecordingProcess({ exitCode: 0, stderr: "", stdout: "tests ok" })
+    const runner = new GenericCommandRunner({
+      cleanChecker: new FixedCleanChecker(true),
+      definitions: [
+        { args: ["test", "--", "runner"], command: "pnpm", id: "pnpm-test", type: "generic" },
+      ],
+      genericCommandAllowlist: ["pnpm"],
+      processRunner,
+    })
+
+    // When: the safe fix command runs.
+    const result = await runner.run(genericRequest("pnpm-test", "fix_and_mr"))
+
+    // Then: the process seam is invoked exactly once with the expected argv.
+    expect(result.stdout).toBe("tests ok")
+    expect(processRunner.invocations).toHaveLength(1)
+    expect(processRunner.invocations[0]?.command).toBe("pnpm")
   })
 
   it("rejects command definitions outside the configured allowlist", async () => {
@@ -103,7 +230,7 @@ describe("generic command runner", () => {
     expect(processRunner.invocations).toEqual([])
   })
 
-  it("fails analysis-only runs when the worktree is dirty after process exit", async () => {
+  it("fails analysis-only runs when the workspace is dirty after process exit", async () => {
     // Given: an analysis command succeeds but the post-run clean check reports dirty state.
     const runner = new GenericCommandRunner({
       cleanChecker: new FixedCleanChecker(false),
@@ -112,7 +239,7 @@ describe("generic command runner", () => {
       processRunner: new RecordingProcess({ exitCode: 0, stderr: "", stdout: "analysis complete" }),
     })
 
-    // When / Then: analysis-only fails closed on dirty worktree state.
+    // When / Then: analysis-only fails closed on dirty workspace state.
     await expect(runner.run(genericRequest("echo-safe"))).rejects.toThrow(/dirty/u)
   })
 

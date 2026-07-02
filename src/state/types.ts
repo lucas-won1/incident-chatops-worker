@@ -87,6 +87,29 @@ export type MrLinkInput = {
   readonly createdAt: string
 }
 
+export type IncidentHandoffInput = {
+  readonly incidentId: string
+  readonly issueId: string
+  readonly repoId: string
+  readonly repoPath: string
+  readonly jobId: string
+  readonly provider: string
+  readonly mrUrl: string
+  readonly sourceBranch: string
+  readonly targetBranch: string
+  readonly headSha: string
+  readonly analysisSummary: string
+  readonly changesSummary: string
+  readonly verificationSummary: string
+  readonly mrReadiness: string
+  readonly createdAt: string
+  readonly followUpPrompt: string
+}
+
+export type IncidentHandoffRecord = IncidentHandoffInput & {
+  readonly handoffId: string
+}
+
 export type ApprovalInput = {
   readonly incidentId: string
   readonly jobId: string
@@ -123,6 +146,13 @@ export type CompleteJobInput = {
   readonly jobId: string
   readonly state: TerminalJobState
   readonly finishedAt: string
+}
+
+export type AbandonActiveJobsInput = {
+  readonly actor: string
+  readonly details: string
+  readonly finishedAt: string
+  readonly state: TerminalJobState
 }
 
 export type AuditEntryInput = {

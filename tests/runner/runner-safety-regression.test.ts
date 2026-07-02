@@ -37,8 +37,8 @@ class RecordingCleanChecker implements RunnerCleanChecker {
 
   public constructor(private readonly clean: boolean) {}
 
-  public async isClean(worktreePath: string): Promise<boolean> {
-    this.calls.push(worktreePath)
+  public async isClean(workspacePath: string): Promise<boolean> {
+    this.calls.push(workspacePath)
     return this.clean
   }
 }
@@ -48,7 +48,7 @@ const genericRequest = (commandId: string) => ({
   incidentContext,
   mode: "analysis_only" as const,
   repositoryConstraints: "analysis only",
-  worktreePath: "/tmp/worktree",
+  workspacePath: "/tmp/workspace",
 })
 
 describe("runner safety regressions", () => {
@@ -81,7 +81,7 @@ describe("runner safety regressions", () => {
       incidentContext,
       mode: "analysis_only",
       repositoryConstraints: "analysis only",
-      worktreePath: "/tmp/worktree",
+      workspacePath: "/tmp/workspace",
     })
 
     // Then: every returned text field is redacted by exact configured secret value.
@@ -117,7 +117,7 @@ describe("runner safety regressions", () => {
     // When: the generic runner returns capped process output.
     const result = await runner.run({
       ...genericRequest("node-secret"),
-      worktreePath: process.cwd(),
+      workspacePath: process.cwd(),
     })
 
     // Then: no raw secret prefix survives the real SafeProcessRunner path.
@@ -153,7 +153,7 @@ describe("runner safety regressions", () => {
     try {
       await runner.run({
         ...genericRequest("node-secret-fail"),
-        worktreePath: process.cwd(),
+        workspacePath: process.cwd(),
       })
       expect.unreachable("runner should surface the nonzero child exit")
     } catch (error) {
@@ -236,6 +236,7 @@ describe("runner safety regressions", () => {
   it.each([
     ["env -S sh -c", "env", ["-S", "sh -c 'git push'"]],
     ["/usr/bin/env -S bash -lc", "/usr/bin/env", ["-S", "bash -lc 'git commit'"]],
+    ["env -S fragmented bash -lc", "env", ["-S", "b''ash", "-lc", "echo hi"]],
     [
       "env --split-string pwsh -Command",
       "env",
@@ -259,8 +260,8 @@ describe("runner safety regressions", () => {
     },
   )
 
-  it("checks analysis-only clean state after nonzero process exit and reports dirty worktree", async () => {
-    // Given: an analysis command fails after leaving the worktree dirty.
+  it("checks analysis-only clean state after nonzero process exit and reports dirty workspace", async () => {
+    // Given: an analysis command fails after leaving the workspace dirty.
     const cleanChecker = new RecordingCleanChecker(false)
     const runner = new GenericCommandRunner({
       cleanChecker,
@@ -273,19 +274,19 @@ describe("runner safety regressions", () => {
       }),
     })
 
-    // When / Then: the post-run clean check still runs and dirty worktree is surfaced.
+    // When / Then: the post-run clean check still runs and dirty workspace is surfaced.
     try {
       await runner.run(genericRequest("echo-safe"))
-      expect.unreachable("runner should reject dirty analysis-only worktree")
+      expect.unreachable("runner should reject dirty analysis-only workspace")
     } catch (error) {
       if (!(error instanceof RunnerDirtyWorktreeError)) {
         throw error
       }
       expect(error).toMatchObject({
         failedProcess: { command: "echo", exitCode: 7 },
-        worktreePath: "/tmp/worktree",
+        workspacePath: "/tmp/workspace",
       })
     }
-    expect(cleanChecker.calls).toEqual(["/tmp/worktree"])
+    expect(cleanChecker.calls).toEqual(["/tmp/workspace"])
   })
 })

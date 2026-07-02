@@ -67,6 +67,14 @@ class FakeWorktreeSession implements WorkflowWorktreeSession {
 }
 
 class FakeRepoAdapter implements WorkflowRepoAdapter {
+  public currentHead(): Promise<string> {
+    return Promise.resolve("0000000000000000000000000000000000000000")
+  }
+
+  public dirtyStatus(): Promise<string> {
+    return Promise.resolve("")
+  }
+
   public async openWorktree(request: {
     readonly branchName: string
     readonly jobId: string

@@ -3,11 +3,8 @@ import { z } from "zod"
 
 import type { WorkerSettings } from "../config/index.js"
 import { LocalGitRepoAdapter } from "../repo/local-git.js"
-import { GitRunnerCleanChecker } from "../runner/clean-checker.js"
-import { CodexExecRunner } from "../runner/codex.js"
+import { createProductionRunner } from "../runner/factory.js"
 import type { RunnerAdapter, RunnerRequest } from "../runner/types.js"
-import type { PollOnceOptions, PollOnceResult } from "../sentry/index.js"
-import { fetchIssueContext, pollOnce } from "../sentry/index.js"
 import { redactSensitiveText } from "../shared/redaction.js"
 import type {
   SlackActionIntent,
@@ -22,15 +19,28 @@ import {
   type WorkflowDetectedIncident,
   type WorkflowRepoAdapter,
   type WorkflowSlackPublisher,
+  type WorkflowWorktreePreparer,
 } from "../workflow/index.js"
+import { CommandWorktreePreparer } from "../workflow/worktree-preparer.js"
+import {
+  type DaemonPollOnce,
+  daemonSentryContext,
+  repoPathsByProject,
+} from "./daemon-sentry-runtime.js"
 import {
   createSelectedMergeRequestProvider,
   daemonSecretValues,
   type MergeRequestProviderFactory,
   selectedMergeRequestDefaults,
   selectedMergeRequestProviderOptions,
-  serviceTokenEnvNames,
 } from "./mr-provider-routing.js"
+
+export type { DaemonPollOnce } from "./daemon-sentry-runtime.js"
+export {
+  detectedWorkflowIncident,
+  formatPollOnceResult,
+  runDaemonPollOnce,
+} from "./daemon-sentry-runtime.js"
 
 type DaemonStateStore = ReturnType<typeof openSqliteStateStore>
 
@@ -45,8 +55,6 @@ export type DaemonWorkflowFactory = (
   settings: WorkerSettings,
 ) => DaemonWorkflowRuntime | Promise<DaemonWorkflowRuntime>
 
-export type DaemonPollOnce = (options: PollOnceOptions) => Promise<PollOnceResult>
-
 export type SlackSocketModeFactory = (options: SlackSocketModeOptions) => SlackSocketModeAdapter
 
 export type DaemonRuntimeDependencies = {
@@ -58,6 +66,7 @@ export type DaemonRuntimeDependencies = {
   readonly sentryContext?: IncidentWorkflowOptions["sentryContext"]
   readonly slack?: WorkflowSlackPublisher
   readonly slackSocketModeFactory?: SlackSocketModeFactory
+  readonly worktreePreparer?: WorkflowWorktreePreparer
   readonly writeStatus?: (line: string) => void
 }
 
@@ -67,31 +76,42 @@ const slackPostResponseSchema = z.object({
   ts: z.string().optional(),
 })
 
-const repoPathForIncident = (settings: WorkerSettings, repoId: string): string => {
-  const projectIndex = settings.config.sentryProjects.findIndex(
-    (project) => project.projectSlug === repoId,
-  )
-  return settings.config.repos.allowlist[projectIndex] ?? settings.config.repos.allowlist[0] ?? ""
-}
-
-const repoPathsByProject = (settings: WorkerSettings): Readonly<Record<string, string>> =>
-  Object.fromEntries(
-    settings.config.sentryProjects.map((project) => [
-      project.projectSlug,
-      repoPathForIncident(settings, project.projectSlug),
-    ]),
-  )
-
-const sentryProjectForIncident = (settings: WorkerSettings, repoId: string) => {
-  const project = settings.config.sentryProjects.find((mapping) => mapping.projectSlug === repoId)
-  if (project === undefined) {
-    throw new Error(`Sentry project mapping missing for ${repoId}`)
+const recoverAbandonedActiveJobs = (
+  state: DaemonStateStore,
+  reportStatus: ((line: string) => void) | undefined,
+): void => {
+  const recoveredJobs = state.abandonActiveJobs({
+    actor: "daemon",
+    details: "daemon startup recovered active job left by a previous worker process",
+    finishedAt: new Date().toISOString(),
+    state: "failed",
+  })
+  if (recoveredJobs.length === 0) {
+    return
   }
-  return project
+  const jobIds = recoveredJobs.map((job) => job.jobId).join(",")
+  reportStatus?.(
+    `workflow recovered abandoned active jobs count=${recoveredJobs.length} jobs=${jobIds}`,
+  )
 }
 
 const isPendingThreadTs = (threadTs: string): boolean =>
   threadTs.trim() === "" || threadTs === "pending"
+
+const createConfiguredWorktreePreparer = (
+  settings: WorkerSettings,
+): WorkflowWorktreePreparer | undefined => {
+  const commands = settings.config.worktreePrepare.commands
+  if (commands.length === 0) {
+    return undefined
+  }
+  return new CommandWorktreePreparer({
+    commands,
+    projectEnv: settings.config.runners.projectEnv,
+    secretValues: daemonSecretValues(settings),
+    timeoutMs: settings.config.worktreePrepare.timeoutMs,
+  })
+}
 
 const postSlackMessage = async (
   settings: WorkerSettings,
@@ -125,13 +145,29 @@ export const createProductionDaemonWorkflowRuntime = (
   settings: WorkerSettings,
   dependencies: Pick<
     DaemonRuntimeDependencies,
-    "mrProviderFactory" | "repo" | "runner" | "sentryContext" | "slack"
+    | "mrProviderFactory"
+    | "repo"
+    | "runner"
+    | "sentryContext"
+    | "slack"
+    | "worktreePreparer"
+    | "writeStatus"
   > = {},
 ): DaemonWorkflowRuntime => {
+  const runner = dependencies.runner ?? createProductionRunner(settings)
   const state = openSqliteStateStore({ path: settings.env.stateDbPath })
   const createMrProvider = dependencies.mrProviderFactory ?? createSelectedMergeRequestProvider
   const providerOptions = selectedMergeRequestProviderOptions(settings)
   const mrDefaults = selectedMergeRequestDefaults(settings)
+  const reportStatus =
+    dependencies.writeStatus === undefined
+      ? undefined
+      : (line: string): void => {
+          dependencies.writeStatus?.(redactSensitiveText(line, daemonSecretValues(settings)))
+        }
+  recoverAbandonedActiveJobs(state, reportStatus)
+  const worktreePreparer =
+    dependencies.worktreePreparer ?? createConfiguredWorktreePreparer(settings)
   const workflow = new IncidentWorkflow({
     allowedRunnerCommands: settings.config.runners.genericCommandAllowlist,
     branchPrefix: settings.config.branchPrefix,
@@ -147,121 +183,37 @@ export const createProductionDaemonWorkflowRuntime = (
         worktreeRoot: settings.config.worktreeRoot,
       }),
     repoPaths: repoPathsByProject(settings),
-    runner:
-      dependencies.runner ??
-      new CodexExecRunner({
-        cleanChecker: new GitRunnerCleanChecker(),
-        secretEnvNames: serviceTokenEnvNames,
-        secretValues: daemonSecretValues(settings),
-      }),
-    sentryContext: dependencies.sentryContext ?? {
-      fetchIssueContext: (incident) => {
-        const project = sentryProjectForIncident(settings, incident.repoId)
-        return fetchIssueContext({
-          authToken: settings.env.sentryAuthToken,
-          baseUrl: settings.env.sentryBaseUrl,
-          issueId: incident.issueId,
-          organizationSlug: project.organizationSlug,
-        })
-      },
-    },
+    runner,
+    sentryContext: dependencies.sentryContext ?? daemonSentryContext(settings),
     sentryContextSecretValues: daemonSecretValues(settings),
     slack: dependencies.slack ?? {
       postMessage: (message) => postSlackMessage(settings, message),
     },
     state,
+    ...(reportStatus === undefined ? {} : { statusReporter: reportStatus }),
+    ...(worktreePreparer === undefined ? {} : { worktreePreparer }),
   })
 
   return {
     handleDetectedIncident: (incident) => workflow.handleDetectedIncident(incident),
     handleSlackAction: async (intent) => {
-      await workflow.handleSlackAction(intent)
+      const actionDetails = `kind=${intent.kind} issue=${intent.issueId}`
+      reportStatus?.(`workflow action received ${actionDetails}`)
+      try {
+        const result = await workflow.handleSlackAction(intent)
+        const jobDetails =
+          "jobId" in result && result.jobId !== undefined ? ` job=${result.jobId}` : ""
+        reportStatus?.(
+          `workflow action handled ${actionDetails} result=${result.kind}${jobDetails}`,
+        )
+      } catch (error) {
+        if (error instanceof Error) {
+          reportStatus?.(`workflow action failed ${actionDetails} error=${error.message}`)
+        }
+        throw error
+      }
     },
     stateStore: state,
     stop: () => state.close(),
-  }
-}
-
-export const detectedWorkflowIncident = (
-  settings: WorkerSettings,
-  incident: Parameters<NonNullable<PollOnceOptions["onDetectedIncident"]>>[0],
-): WorkflowDetectedIncident => ({
-  ...incident,
-  repoPath: repoPathForIncident(settings, incident.repoId),
-})
-
-const recordDegradedPoll = (
-  settings: WorkerSettings,
-  store: DaemonStateStore | undefined,
-  writeStatus: ((line: string) => void) | undefined,
-  details: string,
-): void => {
-  const safeDetails = redactSensitiveText(details, daemonSecretValues(settings))
-  writeStatus?.(`Sentry polling scheduler: degraded ${safeDetails}`)
-  store?.appendAuditEntry({
-    actor: "daemon",
-    action: "sentry.poll_degraded",
-    configHash: "daemon",
-    details: safeDetails,
-    occurredAt: new Date().toISOString(),
-  })
-}
-
-export const formatPollOnceResult = (result: PollOnceResult): string =>
-  `source=sentry status=${result.status} new=${result.newIncidents} updated=${result.updatedIncidents} skipped=${result.skippedIncidents} detailFetches=${result.detailFetches}${result.backoffSeconds === undefined ? "" : ` backoffSeconds=${result.backoffSeconds}`}`
-
-export const runDaemonPollOnce = async (
-  settings: WorkerSettings,
-  workflow: DaemonWorkflowRuntime,
-  dependencies: DaemonRuntimeDependencies,
-): Promise<PollOnceResult> => {
-  let store: DaemonStateStore | undefined
-  let ownsStore = false
-  try {
-    store = workflow.stateStore
-    if (store === undefined) {
-      store = openSqliteStateStore({ path: settings.env.stateDbPath })
-      ownsStore = true
-    }
-    const result = await (dependencies.pollOnce ?? pollOnce)({
-      authToken: settings.env.sentryAuthToken,
-      baseUrl: settings.env.sentryBaseUrl,
-      onDetectedIncident: async (incident) => {
-        await workflow.handleDetectedIncident(detectedWorkflowIncident(settings, incident))
-      },
-      projects: settings.config.sentryProjects,
-      secretRedactionValues: daemonSecretValues(settings),
-      store,
-    })
-    if (result.status === "degraded") {
-      recordDegradedPoll(
-        settings,
-        store,
-        dependencies.writeStatus,
-        `Sentry poll degraded${result.backoffSeconds === undefined ? "" : ` backoffSeconds=${result.backoffSeconds}`}`,
-      )
-    }
-    return result
-  } catch (error) {
-    if (error instanceof Error) {
-      recordDegradedPoll(
-        settings,
-        store,
-        dependencies.writeStatus,
-        `${error.name}: ${error.message}`,
-      )
-      return {
-        detailFetches: 0,
-        newIncidents: 0,
-        skippedIncidents: 0,
-        status: "degraded",
-        updatedIncidents: 0,
-      }
-    }
-    throw error
-  } finally {
-    if (ownsStore) {
-      store?.close()
-    }
   }
 }

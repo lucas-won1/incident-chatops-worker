@@ -51,10 +51,12 @@ class FixedCleanChecker implements RunnerCleanChecker {
 
 const createCodexRunner = (processRunner: RunnerProcess): CodexExecRunner =>
   new CodexExecRunner({
+    bin: "/opt/bin/codex",
     cleanChecker: new FixedCleanChecker(true),
     env: {
-      CODEX_BIN: "/opt/bin/codex",
-      CODEX_HOME: "/tmp/codex-home",
+      CODEX_BIN: "/ambient/codex",
+      CODEX_HOME: "/ambient/codex-home",
+      CODEX_THREAD_ID: "019f-live-app-thread",
       GITLAB_TOKEN: "glpat-secret-value",
       HOME: "/Users/test",
       PATH: "/usr/bin",
@@ -68,14 +70,14 @@ const createCodexRunner = (processRunner: RunnerProcess): CodexExecRunner =>
 const runCodex = async (
   runner: CodexExecRunner,
   mode: RunnerModeName,
-  worktreePath: string,
+  workspacePath: string,
 ): Promise<void> => {
   await runner.run({
     allowedCommands: ["pnpm", "git status"],
     incidentContext,
     mode,
     repositoryConstraints: "Preserve unrelated work. Do not revert Todo 1-6/8 changes.",
-    worktreePath,
+    workspacePath,
   })
 }
 
@@ -84,10 +86,10 @@ describe("Codex exec runner", () => {
     // Given: a Codex runner with an explicit executable override and a recording process seam.
     const processRunner = new LastMessageProcess(JSON.stringify({ analysis: "analysis" }))
     const runner = createCodexRunner(processRunner)
-    const worktreePath = "/tmp/incident-worktree"
+    const workspacePath = "/tmp/incident-workspace"
 
     // When: analysis-only execution is requested.
-    await runCodex(runner, "analysis_only", worktreePath)
+    await runCodex(runner, "analysis_only", workspacePath)
 
     // Then: Codex receives the exact safe argv shape, a minimal env, and a restricted prompt.
     const invocation = processRunner.invocations[0]
@@ -96,7 +98,7 @@ describe("Codex exec runner", () => {
       "exec",
       "--json",
       "--cd",
-      worktreePath,
+      workspacePath,
       "--sandbox",
       "read-only",
       "--output-last-message",
@@ -106,7 +108,6 @@ describe("Codex exec runner", () => {
       "-",
     ])
     expect(invocation?.env).toEqual({
-      CODEX_HOME: "/tmp/codex-home",
       HOME: "/Users/test",
       PATH: "/usr/bin",
     })
@@ -131,15 +132,16 @@ describe("Codex exec runner", () => {
         analysis: "analysis",
         branchInfo: "incident/SENTRY-123",
         changesSummary: "changes",
+        mergeRequestBody: "## 요약\n\n- changes",
         mrReadiness: "ready",
         verificationResults: "passed: pnpm test",
       }),
     )
     const runner = createCodexRunner(processRunner)
-    const worktreePath = "/tmp/incident-worktree"
+    const workspacePath = "/tmp/incident-workspace"
 
     // When: fix-and-MR execution is requested.
-    await runCodex(runner, "fix_and_mr", worktreePath)
+    await runCodex(runner, "fix_and_mr", workspacePath)
 
     // Then: Codex receives workspace-write sandbox and the fix result schema contract.
     const invocation = processRunner.invocations[0]
@@ -148,7 +150,7 @@ describe("Codex exec runner", () => {
       "exec",
       "--json",
       "--cd",
-      worktreePath,
+      workspacePath,
       "--sandbox",
       "workspace-write",
       "--output-last-message",
@@ -159,7 +161,9 @@ describe("Codex exec runner", () => {
     expect(invocation?.stdin).toContain("verificationResults")
     expect(invocation?.stdin).toContain("branchInfo")
     expect(invocation?.stdin).toContain("mrReadiness")
+    expect(invocation?.stdin).toContain("mergeRequestBody")
     expect(invocation?.stdin).toContain("## Verification requirements")
+    expect(invocation?.stdin).toContain("## Merge request requirements")
   })
 
   it("parses fix-mode output-last-message JSON and surfaces failed verification", async () => {
@@ -170,6 +174,7 @@ describe("Codex exec runner", () => {
         analysis: "Crash comes from nullable checkout state.",
         branchInfo: "incident/SENTRY-123",
         changesSummary: "Added guarded checkout access.",
+        mergeRequestBody: "## 요약\n\n- Added guarded checkout access.",
         mrReadiness: "blocked until verification passes",
         verificationResults: "failed: pnpm test",
       }),
@@ -187,8 +192,8 @@ describe("Codex exec runner", () => {
         allowedCommands: ["pnpm test"],
         incidentContext,
         mode: "fix_and_mr",
-        repositoryConstraints: "Use only the approved worktree.",
-        worktreePath: "/tmp/incident-worktree",
+        repositoryConstraints: "Use only the approved workspace.",
+        workspacePath: "/tmp/incident-workspace",
       })
 
       // Then: the workflow-visible result comes from Codex JSON, not stdout fallback.
@@ -197,6 +202,7 @@ describe("Codex exec runner", () => {
       expect(result.changesSummary).toBe("Added guarded checkout access.")
       expect(result.branchInfo).toBe("incident/SENTRY-123")
       expect(result.mrReadiness).toBe("blocked until verification passes")
+      expect(result.mergeRequestBody).toContain("Added guarded checkout access.")
     } finally {
       rmSync(outputRoot, { recursive: true, force: true })
     }
@@ -218,8 +224,8 @@ describe("Codex exec runner", () => {
         runner.run({
           incidentContext,
           mode: "fix_and_mr",
-          repositoryConstraints: "Use only the approved worktree.",
-          worktreePath: "/tmp/incident-worktree",
+          repositoryConstraints: "Use only the approved workspace.",
+          workspacePath: "/tmp/incident-workspace",
         }),
       ).rejects.toThrow(/Codex.*JSON|JSON.*Codex/u)
     } finally {
@@ -244,12 +250,32 @@ describe("Codex exec runner", () => {
         runner.run({
           incidentContext,
           mode: "fix_and_mr",
-          repositoryConstraints: "Use only the approved worktree.",
-          worktreePath: "/tmp/incident-worktree",
+          repositoryConstraints: "Use only the approved workspace.",
+          workspacePath: "/tmp/incident-workspace",
         }),
       ).rejects.toThrow(RunnerOutputParseError)
     } finally {
       rmSync(outputRoot, { recursive: true, force: true })
     }
+  })
+
+  it("accepts deprecated worktreePath only as a workspacePath compatibility alias", async () => {
+    // Given: a public caller still sends the old runner request field.
+    const processRunner = new LastMessageProcess(JSON.stringify({ analysis: "legacy alias" }))
+    const runner = createCodexRunner(processRunner)
+
+    // When: analysis runs without the new workspacePath field.
+    await runner.run({
+      allowedCommands: ["pnpm test"],
+      incidentContext,
+      mode: "analysis_only",
+      repositoryConstraints: "Use only the approved workspace.",
+      worktreePath: "/tmp/legacy-worktree-alias",
+    })
+
+    // Then: the adapter intentionally treats the legacy field as the workspace cwd.
+    const invocation = processRunner.invocations[0]
+    expect(invocation?.cwd).toBe("/tmp/legacy-worktree-alias")
+    expect(invocation?.args).toContain("/tmp/legacy-worktree-alias")
   })
 })

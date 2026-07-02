@@ -1,3 +1,5 @@
+import { RunnerWorkspacePathError } from "./errors.js"
+
 export type RunnerModeName = "analysis_only" | "fix_and_mr"
 
 export type RunnerCommandDefinition = {
@@ -36,19 +38,38 @@ export interface RunnerProcess {
 }
 
 export interface RunnerCleanChecker {
-  isClean(worktreePath: string): Promise<boolean>
+  dirtyStatus?: (workspacePath: string) => Promise<string>
+  isClean(workspacePath: string): Promise<boolean>
 }
 
-export type RunnerRequest = {
+type RunnerRequestFields = {
   readonly allowedCommands?: readonly string[]
   readonly incidentContext: RunnerIncidentContext
   readonly mode: RunnerModeName
   readonly repositoryConstraints: string
-  readonly worktreePath: string
 }
+
+export type RunnerRequest = RunnerRequestFields &
+  (
+    | {
+        readonly workspacePath: string
+        readonly worktreePath?: string | undefined
+      }
+    | {
+        readonly workspacePath?: undefined
+        readonly worktreePath: string
+      }
+  )
 
 export type GenericRunnerRequest = RunnerRequest & {
   readonly commandId: string
+}
+
+export const runnerWorkspacePath = (request: RunnerRequest): string => {
+  if (request.workspacePath !== undefined && request.worktreePath !== undefined) {
+    throw new RunnerWorkspacePathError()
+  }
+  return request.workspacePath ?? request.worktreePath
 }
 
 export type RunnerResult = {
@@ -56,6 +77,7 @@ export type RunnerResult = {
   readonly branchInfo?: string
   readonly changesSummary?: string
   readonly command: string
+  readonly mergeRequestBody?: string
   readonly mode: RunnerModeName
   readonly mrReadiness?: string
   readonly stderr: string

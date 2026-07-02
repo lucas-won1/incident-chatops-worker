@@ -134,16 +134,16 @@ describe("workflow transition audit", () => {
   })
 
   it("writes audit rows for failure and closed terminal state transitions", async () => {
-    // Given: a detected incident with a runner failure and another detected incident to close.
-    const runner = new RecordingRunner([runnerResult({ mode: "analysis_only" })])
+    // Given: a detected incident with a fix worktree failure and a close action.
+    const runner = new RecordingRunner([runnerResult({ mode: "fix_and_mr" })])
     const { repo, store, workflow } = createWorkflow(runner)
     repo.openWorktree = async () => {
       throw new Error("boom xoxb-secret-token")
     }
     await workflow.handleDetectedIncident(detectedIncident)
 
-    // When: analysis fails and the incident is closed.
-    await workflow.handleSlackAction(slackAction("analyze_requested", SlackActionIds.analyze))
+    // When: fix fails and the incident is closed.
+    await workflow.handleSlackAction(slackAction("fix_requested", SlackActionIds.fixAndMr))
     await workflow.handleSlackAction(slackAction("closed", SlackActionIds.close))
 
     // Then: terminal transitions are audited and sensitive failure text is redacted.
@@ -152,7 +152,7 @@ describe("workflow transition audit", () => {
       expect.arrayContaining(["workflow.failed", "workflow.closed"]),
     )
     expect(audit.map((entry) => `${entry.stateFrom}->${entry.stateTo}`)).toEqual(
-      expect.arrayContaining(["analysis_running->failed", "failed->closed"]),
+      expect.arrayContaining(["fix_running->failed", "failed->closed"]),
     )
     expect(JSON.stringify(audit)).not.toContain("xoxb-secret-token")
     store.close()
